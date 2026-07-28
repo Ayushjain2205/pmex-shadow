@@ -1,5 +1,234 @@
-"""WSS OrderFilled subscription on CTF Exchange V2 + NegRisk Exchange (FR-W-1..5).
+"""WSS subscription to `OrderFilled` on CTF Exchange V2 + NegRisk Exchange V2,
+topic-filtered to the union of watched targets (FR-W-1..5).
 
-Not implemented in Phase 0 — this is Phase 1 scope. Contract addresses and the
-`OrderFilled` event ABI needed here are already verified in docs/VERIFIED.md items 1-3.
+Uses raw JSON-RPC over `websockets` rather than web3.py's higher-level subscription
+manager — this is standard Ethereum JSON-RPC (`eth_subscribe`/`eth_getLogs`), not
+Polymarket-specific, so there's nothing here that needed empirical verification beyond
+the OrderFilled decode itself (docs/VERIFIED.md items 2-3), and staying at the raw
+JSON-RPC layer means exactly what's on the wire is known rather than trusted to a
+library's internal subscription-management version churn.
 """
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import json
+import logging
+
+import asyncpg
+import httpx
+import websockets
+
+from pmex_shadow.contracts import CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2, ORDER_FILLED_TOPIC0
+from pmex_shadow.watcher.normalize import decode_order_filled_log, target_fill_from_chain_log
+
+logger = logging.getLogger("pmex_shadow.watcher.chain")
+
+EXCHANGE_ADDRESSES = [CTF_EXCHANGE_V2, NEG_RISK_EXCHANGE_V2]
+
+
+def _address_to_topic(addr: str) -> str:
+    return "0x" + addr.lower().removeprefix("0x").rjust(64, "0")
+
+
+async def get_watched_targets(conn: asyncpg.Connection) -> set[str]:
+    rows = await conn.fetch("SELECT target FROM target_stats")
+    return {r["target"].lower() for r in rows}
+
+
+async def get_cursor(conn: asyncpg.Connection) -> int | None:
+    row = await conn.fetchrow("SELECT last_processed_block FROM watcher_cursor WHERE id = 1")
+    return row["last_processed_block"] if row else None
+
+
+async def set_cursor(conn: asyncpg.Connection, block: int) -> None:
+    await conn.execute(
+        """
+        INSERT INTO watcher_cursor (id, last_processed_block) VALUES (1, $1)
+        ON CONFLICT (id) DO UPDATE SET last_processed_block = EXCLUDED.last_processed_block
+        """,
+        block,
+    )
+
+
+async def insert_fill(conn: asyncpg.Connection, fill, raw: dict) -> int | None:
+    """Insert a TargetFill; NOTIFY only on a genuine insert (FR-W-9). A conflict on the
+    unique dedupe_key is a normal, harmless outcome (FR-W-6) — logged at DEBUG."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO target_fills
+            (dedupe_key, target, token_id, side, price, size, notional_usd,
+             block_number, block_ts, detected_at, source, raw)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (dedupe_key) DO NOTHING
+        RETURNING id
+        """,
+        fill.dedupe_key, fill.target, fill.token_id, fill.side.value, fill.price, fill.size,
+        fill.notional_usd, fill.block_number, fill.block_ts, fill.detected_at, fill.source,
+        json.dumps(raw, default=str),
+    )
+    if row is None:
+        logger.debug("duplicate fill skipped: %s", fill.dedupe_key)
+        return None
+    fill_id = row["id"]
+    await conn.execute("SELECT pg_notify('pmex_fill', $1)", str(fill_id))
+    return fill_id
+
+
+async def _rpc(client: httpx.AsyncClient, http_url: str, method: str, params: list) -> object:
+    resp = await client.post(http_url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"{method} failed: {data['error']}")
+    return data["result"]
+
+
+async def backfill(
+    client: httpx.AsyncClient,
+    http_url: str,
+    conn: asyncpg.Connection,
+    targets: set[str],
+    from_block: int,
+    to_block: int,
+    chunk_blocks: int,
+) -> None:
+    """Chunked eth_getLogs over [from_block, to_block] inclusive (FR-W-4). Shrinks the
+    chunk on an oversized-range error rather than trusting a fixed cap (docs/VERIFIED.md
+    item 11 — the real cap is provider-specific and undocumented)."""
+    if not targets:
+        return
+    maker_topics = [_address_to_topic(t) for t in targets]
+    block_ts_cache: dict[int, dt.datetime] = {}
+    start = from_block
+    chunk = chunk_blocks
+
+    while start <= to_block:
+        end = min(start + chunk - 1, to_block)
+        try:
+            logs = await _rpc(
+                client, http_url, "eth_getLogs",
+                [{
+                    "address": EXCHANGE_ADDRESSES,
+                    "topics": [ORDER_FILLED_TOPIC0, None, maker_topics],
+                    "fromBlock": hex(start),
+                    "toBlock": hex(end),
+                }],
+            )
+        except (RuntimeError, httpx.HTTPStatusError) as exc:
+            if chunk > 50:
+                chunk = max(chunk // 2, 50)
+                logger.warning("eth_getLogs range rejected (%s), shrinking chunk to %d blocks", exc, chunk)
+                continue
+            raise
+
+        for log in logs:
+            decoded = decode_order_filled_log(log)
+            block_num = decoded["block_number"]
+            if block_num not in block_ts_cache:
+                block = await _rpc(client, http_url, "eth_getBlockByNumber", [hex(block_num), False])
+                block_ts_cache[block_num] = dt.datetime.fromtimestamp(int(block["timestamp"], 16), tz=dt.timezone.utc)
+            fill = target_fill_from_chain_log(
+                decoded, decoded["maker"], block_ts_cache[block_num], dt.datetime.now(dt.timezone.utc)
+            )
+            if fill is not None:
+                await insert_fill(conn, fill, log)
+
+        await set_cursor(conn, end)
+        start = end + 1
+
+
+async def _resolve_urls(settings) -> tuple[str, str]:
+    """Derive HTTP RPC and WS RPC URLs. Falls back to the WS URL's HTTP-scheme
+    equivalent if a dedicated HTTP URL isn't configured, since eth_getLogs/eth_call
+    work fine over either transport."""
+    ws_url = settings.polygon_ws_url
+    http_url = settings.polygon_rpc_url or ws_url.replace("wss://", "https://").replace("ws://", "http://")
+    return http_url, ws_url
+
+
+async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets_conn: asyncpg.Connection, sub_conn: asyncpg.Connection, chunk_blocks: int) -> None:
+    async with httpx.AsyncClient(timeout=30) as client:
+        targets = await get_watched_targets(targets_conn)
+        head_hex = await _rpc(client, http_url, "eth_blockNumber", [])
+        head = int(head_hex, 16)
+
+        cursor = await get_cursor(targets_conn)
+        if cursor is not None and cursor < head:
+            logger.info("backfilling blocks %d..%d before subscribing", cursor, head)
+            await backfill(client, http_url, targets_conn, targets, cursor, head, chunk_blocks)
+        elif cursor is None:
+            await set_cursor(targets_conn, head)
+
+        if not targets:
+            # An empty list at a topic position means "no constraint" (matches
+            # EVERY OrderFilled log), not "matches nothing" — confirmed empirically
+            # against a live provider while building this. Subscribing with zero
+            # targets would silently ingest the entire exchange's fill stream.
+            # Idle instead: wait for a target to be registered before subscribing.
+            logger.info("no targets configured yet — waiting before subscribing")
+            await asyncio.sleep(10)
+            return
+
+        maker_topics = [_address_to_topic(t) for t in targets]
+        async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+            sub_request = {
+                "jsonrpc": "2.0", "id": 1, "method": "eth_subscribe",
+                "params": ["logs", {"address": EXCHANGE_ADDRESSES, "topics": [ORDER_FILLED_TOPIC0, None, maker_topics]}],
+            }
+            await ws.send(json.dumps(sub_request))
+            ack = json.loads(await ws.recv())
+            if "result" not in ack:
+                raise RuntimeError(f"eth_subscribe failed: {ack}")
+            logger.info("subscribed to OrderFilled logs (%d targets)", len(targets))
+
+            block_ts_cache: dict[int, dt.datetime] = {}
+            async for message in ws:
+                msg = json.loads(message)
+                if msg.get("method") != "eth_subscription":
+                    continue
+                log = msg["params"]["result"]
+                decoded = decode_order_filled_log(log)
+                block_num = decoded["block_number"]
+                if block_num not in block_ts_cache:
+                    block = await _rpc(client, http_url, "eth_getBlockByNumber", [hex(block_num), False])
+                    block_ts_cache[block_num] = dt.datetime.fromtimestamp(int(block["timestamp"], 16), tz=dt.timezone.utc)
+                    block_ts_cache = dict(list(block_ts_cache.items())[-64:])  # bounded cache
+                fill = target_fill_from_chain_log(
+                    decoded, decoded["maker"], block_ts_cache[block_num], dt.datetime.now(dt.timezone.utc)
+                )
+                if fill is not None:
+                    await insert_fill(sub_conn, fill, log)
+                await set_cursor(sub_conn, block_num)
+
+
+async def run_chain_watcher(settings) -> None:
+    """Reconnect-forever loop with fallback RPC failover (FR-W-5) and backfill-on-gap
+    (FR-W-3/4). Every failover is logged as an `events` row at WARN."""
+    http_url, primary_ws = await _resolve_urls(settings)
+    fallback_ws = settings.polygon_ws_url_fallback
+
+    targets_conn = await asyncpg.connect(settings.database_url)
+    sub_conn = await asyncpg.connect(settings.database_url)
+    try:
+        use_fallback = False
+        backoff_s = 1
+        while True:
+            ws_url = fallback_ws if (use_fallback and fallback_ws) else primary_ws
+            try:
+                await _subscribe_once(ws_url, http_url, settings.database_url, targets_conn, sub_conn, settings.backfill_chunk_blocks)
+                backoff_s = 1
+            except Exception as exc:
+                logger.warning("chain watcher disconnected (%s), reconnecting in %ds", exc, backoff_s)
+                if not use_fallback and fallback_ws:
+                    use_fallback = True
+                    await targets_conn.execute(
+                        "INSERT INTO events (level, component, message, context) VALUES ('WARN', 'watcher.chain', $1, $2)",
+                        "failing over to fallback RPC", json.dumps({"primary": primary_ws, "fallback": fallback_ws, "error": str(exc)}),
+                    )
+                await asyncio.sleep(backoff_s)
+                backoff_s = min(backoff_s * 2, 30)
+    finally:
+        await targets_conn.close()
+        await sub_conn.close()
