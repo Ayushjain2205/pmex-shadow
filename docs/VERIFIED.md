@@ -69,25 +69,52 @@ level — it would require decoding the non-indexed data first).
 
 ## 3. Maker vs. taker position for a copied target
 
-**Verified empirically**, not assumed. Pulled a live Data API trade and traced it to its
-on-chain logs:
+**Verified empirically first, then confirmed against contract source — and the initial
+empirical read was WRONG.** Recorded here in full because it's exactly the kind of
+mistake "verify, don't guess" is supposed to catch, and it changes how `chain.py` is
+built (one subscription, not two).
 
-- Data API trade: `proxyWallet=0x1230e394bdb4e28f67dc8b37996f1c28ec8edd03`, `side=BUY`,
-  `transactionHash=0x8bacda89fe5d9108fa01cc568e91dd7239ea51b7848ea969995b7ce61eeb4e44`
-- Fetched the receipt via public RPC (`https://1rpc.io/matic`,
-  `eth_getTransactionReceipt`) and decoded both `OrderFilled` logs in that tx (topic0
-  match against the signature in §2):
-  - Log 1: `maker=0x82c857cb...`, **`taker=0x1230e394bdb4e28f67dc8b37996f1c28ec8edd03`**
-  - Log 2: **`maker=0x1230e394bdb4e28f67dc8b37996f1c28ec8edd03`**, `taker=<exchange contract address>`
-    (an artifact of one taker order matching against multiple maker orders — the exchange
-    emits one `OrderFilled` per maker leg, and the second log here reflects the taker's
-    own leg with the exchange as the nominal counterparty)
+**First pass (live tx only, superseded below):** pulled a live Data API trade
+(`proxyWallet=0x1230e394bdb4e28f67dc8b37996f1c28ec8edd03`, `side=BUY`,
+`tx=0x8bacda89fe5d9108fa01cc568e91dd7239ea51b7848ea969995b7ce61eeb4e44`), decoded both
+`OrderFilled` logs in that tx, and initially concluded the target appears as maker in one
+log and taker in the other — so watching would need two topic filters (`topic2 ∈ targets`
+and `topic3 ∈ targets`).
 
-**Conclusion:** the same target appeared as **both maker and taker within a single
-transaction**. FR-W-2 is correct as written: the watcher needs two topic-filtered
-subscriptions/filters — one matching `topic2 ∈ targets` (maker), one matching
-`topic3 ∈ targets` (taker) — because a single `eth_getLogs`/`eth_subscribe` filter ANDs
-across topic positions and cannot OR across topic2 and topic3 in one call.
+**That conclusion was wrong about *why*, which matters.** Fetched
+`Polymarket/ctf-exchange-v2`'s `src/exchange/mixins/Trading.sol` and `Events.sol`
+directly (2026-07-29) and checked every `_emitOrderFilledEvent` call site
+(`_settleComplementaryMaker`, `_settleComplementaryTaker`, `_matchBuyOrders`,
+`_distributeBuyMakerProceeds`, `_distributeSellMakerProceeds` — i.e. every match type:
+COMPLEMENTARY, MINT, MERGE). Every single one follows the same pattern:
+
+```solidity
+_emitOrderFilledEvent(OrderFilledParams({
+    maker: <the order owner's own address>,   // ALWAYS
+    taker: <counterparty, or address(this) for the taker-order's own summary log>,
+    side:  <that same owner's own order.side>,  // ALWAYS matches `maker`, never `taker`
+    ...
+}));
+```
+
+Concretely: when address X's order gets filled — whether X was the protocol-level
+"taker" who submitted the matching order, or a "maker" whose resting order got hit — X
+gets its own log where **X's address sits in the `maker` topic (topic2) and `side` is
+X's own order side.** The `taker` topic (topic3) either holds the real counterparty
+(on the resting maker's log) or `address(this)` — the exchange contract — on the
+initiating order's own summary log. Re-examining the original tx confirms this exactly:
+log 2 (where our target sat in the `maker` slot) was the target's *own* order summary;
+log 1 (where the target sat in the `taker` slot) was the *counterparty's* own order
+summary, not additional information about the target.
+
+**Conclusion (corrected): a single topic filter suffices.**
+`topic0 = OrderFilled sig`, `topic2 (maker) ∈ target_addresses` — every fill belonging to
+a watched target produces a log matching this filter, with `side` directly usable,
+regardless of whether that target acted as protocol maker or taker. **No second
+`topic3`-based subscription is needed.** This simplifies FR-W-1/FR-W-2 versus what the
+PRD assumed (§3.1 of the design doc calls for covering "both positions" — that's still
+true in the sense that a target's trade is captured regardless of which role it played,
+just not in the way originally assumed, i.e. via a second filter).
 
 ---
 
@@ -310,3 +337,42 @@ provider the operator configures.
 4. **NegRiskAdapter address** has conflicting "current" vs. "deprecated" labeling
    between docs.polymarket.com and the live SDK config — unresolved, must be reconfirmed
    against a real neg-risk redemption tx before Phase 4 ships.
+
+---
+
+## Addendum: findings from building Phase 1 (2026-07-29)
+
+Two more things surfaced while implementing and live-testing `watcher/chain.py` against
+a real Polygon WSS endpoint and real target wallets — recorded here because both are
+exactly the "verify, don't guess" failure mode the PRD warns about, and both would have
+been easy to ship wrong.
+
+**12. An empty list at an `eth_subscribe`/`eth_getLogs` topic position matches
+*everything*, not nothing.** Tested directly against a live provider
+(`wss://polygon-bor-rpc.publicnode.com`): subscribing with
+`topics: [ORDER_FILLED_TOPIC0, null, []]` (i.e. maker-topic filter with zero target
+addresses) delivered *every* `OrderFilled` log on the exchange, unfiltered — confirmed
+by receiving a log within 15s whose maker address wasn't in the (empty) target set.
+This is intuitive in hindsight (each topic *position* is a disjunction over its own
+list; an empty disjunction is vacuously unsatisfied... except providers don't implement
+it that way) but it's not something to assume. `chain.py` now explicitly refuses to
+subscribe when the target set is empty — it idles and polls `target_stats` every 10s
+instead. Getting this wrong would have meant a watcher with zero configured targets
+silently ingesting and storing the entire exchange's fill stream.
+
+**13. Free-tier public RPC (publicnode, and presumably similar free providers) rejects
+`eth_getLogs` outside a small recent-block window** with
+`{"code":-32602,"message":"Archive requests require a personal token..."}` — a 403,
+not a graceful empty result. This is provider-side confirmation of the design doc's own
+warning (§3.1: "Public RPCs mostly won't do") — it's not just about missed
+subscriptions, `eth_getLogs` backfill is also restricted. `backfill()`'s
+shrink-and-retry logic (for the *block-range-too-large* case, docs/VERIFIED.md item 11)
+correctly does **not** treat this as recoverable by shrinking further — it exhausts
+retries and surfaces as a reconnect, which is the right behavior; a real deployment
+needs a paid RPC tier for any backfill deeper than a few thousand blocks.
+
+Both findings confirmed empirically end-to-end in Docker: a live target
+(`0x1230e394bdb4e28f67dc8b37996f1c28ec8edd03`) produced correctly-decoded,
+correctly-sided `target_fills` rows from **both** the chain subscription (source=chain,
+real block numbers) and the Data API sweep (source=dataapi) independently, with no
+duplicate rows — see the Phase 1 commit for the captured evidence.
