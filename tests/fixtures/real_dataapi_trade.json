@@ -1,0 +1,17 @@
+{
+  "proxyWallet": "0x1aecd5dd634beca71db3933660d68426c0403bdc",
+  "side": "BUY",
+  "asset": "60398623454518672215750307511107004728586134051350133978272613659550941782240",
+  "conditionId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "size": 1.492536,
+  "price": 0.67,
+  "timestamp": 1785271816,
+  "title": "example market",
+  "slug": "example-market",
+  "eventSlug": "example-event",
+  "outcome": "Yes",
+  "outcomeIndex": 0,
+  "name": "trader",
+  "pseudonym": "Trader",
+  "transactionHash": "0xc88f7c1e2cb2a7847a63f28ef57c11c51543b32ed8104d13a0b69540ebd69098"
+}
