@@ -24,10 +24,7 @@ from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
 
 from pmex_shadow.config import BotConfig, Settings, load_bot_config
-
-CTF_EXCHANGE_V2 = "0xE111180000d2663C0091e4f400237545B87B996B"
-NEG_RISK_EXCHANGE_V2 = "0xe2222d279d744050d28e00520010520000310F59"
-PUSD_COLLATERAL = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+from pmex_shadow.contracts import CTF_EXCHANGE_V2, PUSD_COLLATERAL
 
 Status = str  # "PASS" | "WARN" | "FAIL"
 
