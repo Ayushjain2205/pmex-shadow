@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import stat
 from pathlib import Path
@@ -9,6 +10,8 @@ import typer
 import yaml
 
 from pmex_shadow.config import Settings, load_bot_config
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 
 app = typer.Typer(add_completion=False, help="pmex-shadow — copy-trading execution infrastructure for Polymarket")
 
@@ -128,14 +131,142 @@ def bot_new(
     typer.echo("Edit bots/<name>.yaml to set targets/selectors, then `pmex-shadow doctor --bot <name>`.")
 
 
+@bot_app.command("run")
+def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
+    """Run a bot. Phase 1: watcher-heartbeat supervision only (FR-EXE-8) — halts
+    itself when the shared watcher goes stale. Selection/sizing/execution ship in
+    Phases 2-3; this is deliberately not a full trading loop yet.
+    """
+    import asyncpg
+
+    from pmex_shadow.ops.health import heartbeat_age
+
+    if live:
+        typer.secho("--live is not available before Phase 3's execution router exists", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    bot_yaml_path = BOTS_DIR / f"{name}.yaml"
+    if not bot_yaml_path.exists():
+        typer.secho(f"{bot_yaml_path} not found — run `pmex-shadow bot new {name}` first", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    cfg = load_bot_config(bot_yaml_path)
+    settings = Settings()
+
+    async def _run() -> None:
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            typer.echo(f"bot '{cfg.name}' supervising watcher heartbeat (halts if stale > {settings.watcher_stale_s}s)")
+            while True:
+                age = await heartbeat_age(conn, "watcher")
+                if age is None:
+                    await conn.execute(
+                        "INSERT INTO events (bot_id, level, component, message) VALUES ($1, 'CRITICAL', 'bot.health', 'watcher has never reported a heartbeat')",
+                        cfg.name,
+                    )
+                    typer.secho("HALTED: watcher has never reported a heartbeat", fg=typer.colors.RED)
+                    raise typer.Exit(code=1)
+                if age.total_seconds() > settings.watcher_stale_s:
+                    await conn.execute(
+                        "INSERT INTO events (bot_id, level, component, message, context) VALUES ($1, 'CRITICAL', 'bot.health', 'watcher heartbeat stale, halting', $2)",
+                        cfg.name, f'{{"age_s": {age.total_seconds():.1f}}}',
+                    )
+                    typer.secho(f"HALTED: watcher heartbeat is {age.total_seconds():.1f}s old (limit {settings.watcher_stale_s}s)", fg=typer.colors.RED)
+                    raise typer.Exit(code=1)
+                await asyncio.sleep(5)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
 @app.command()
 def watcher() -> None:
-    """Shared fill stream (Phase 0: heartbeat-only stub; chain/sweep ship in Phase 1)."""
+    """Shared fill stream: heartbeat + chain subscription + Data API sweep + paper
+    logger, run concurrently (§2 design doc — one watcher, shared across all bots).
+    """
+    from pmex_shadow.watcher.chain import run_chain_watcher
     from pmex_shadow.watcher.heartbeat import run_heartbeat_loop
+    from pmex_shadow.watcher.sweep import run_sweep_loop
+    from pmex_shadow.research.paper import run_paper_logger
 
     settings = Settings()
-    typer.echo("watcher stub starting (Phase 1 adds chain subscription + Data API sweep)")
-    asyncio.run(run_heartbeat_loop(settings.database_url, "watcher", lambda: {"phase": 0}))
+
+    async def _main() -> None:
+        tasks = [asyncio.create_task(run_heartbeat_loop(settings.database_url, "watcher", lambda: {
+            "chain_enabled": settings.sources_chain_enabled,
+            "dataapi_enabled": settings.sources_dataapi_enabled,
+        }))]
+
+        if settings.sources_chain_enabled:
+            if not settings.polygon_ws_url:
+                typer.secho("PMEX_SOURCES_CHAIN_ENABLED=1 but POLYGON_WS_URL is not set — chain source disabled", fg=typer.colors.YELLOW)
+            else:
+                tasks.append(asyncio.create_task(run_chain_watcher(settings)))
+        if settings.sources_dataapi_enabled:
+            tasks.append(asyncio.create_task(
+                run_sweep_loop(settings.database_url, settings.data_api_base_url, settings.dataapi_poll_interval_s)
+            ))
+        tasks.append(asyncio.create_task(run_paper_logger(settings.database_url, settings.clob_base_url)))
+
+        typer.echo(f"watcher started: chain={settings.sources_chain_enabled and bool(settings.polygon_ws_url)} dataapi={settings.sources_dataapi_enabled}")
+        await asyncio.gather(*tasks)
+
+    asyncio.run(_main())
+
+
+targets_app = typer.Typer(help="Manage watched targets")
+app.add_typer(targets_app, name="targets")
+
+
+@targets_app.command("add")
+def targets_add(
+    address: str,
+    alias: str | None = typer.Option(None, "--alias"),
+) -> None:
+    """Register a target wallet address for the watcher to track (target_stats)."""
+    import asyncpg
+
+    settings = Settings()
+
+    async def _add() -> None:
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            await conn.execute(
+                """
+                INSERT INTO target_stats (target, alias, status)
+                VALUES ($1, $2, 'shadow')
+                ON CONFLICT (target) DO UPDATE SET alias = COALESCE(EXCLUDED.alias, target_stats.alias)
+                """,
+                address.lower(), alias,
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_add())
+    typer.secho(f"tracking {address.lower()}" + (f" (alias: {alias})" if alias else ""), fg=typer.colors.GREEN)
+    typer.echo("Restart the watcher (or wait for its next reconnect/sweep cycle) to pick it up.")
+
+
+@targets_app.command("list")
+def targets_list() -> None:
+    """List currently tracked targets."""
+    import asyncpg
+
+    settings = Settings()
+
+    async def _list():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            return await conn.fetch("SELECT target, alias, status, last_fill_at FROM target_stats ORDER BY target")
+        finally:
+            await conn.close()
+
+    rows = asyncio.run(_list())
+    if not rows:
+        typer.echo("no targets tracked yet — `pmex-shadow targets add <address>`")
+        return
+    for r in rows:
+        typer.echo(f"{r['target']}  alias={r['alias'] or '-'}  status={r['status']}  last_fill={r['last_fill_at'] or 'never'}")
 
 
 @app.command()

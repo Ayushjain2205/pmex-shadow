@@ -214,6 +214,13 @@ class Settings(BaseSettings):
     polygon_ws_url_fallback: str | None = None
     polygon_rpc_url: str | None = None
 
+    # watcher.sources.{chain,dataapi} from the design doc §3.1, as env vars rather than
+    # a new YAML file — §4's repo layout doesn't define one, and Settings already
+    # covers every other watcher knob this way.
+    sources_chain_enabled: bool = Field(True, validation_alias="PMEX_SOURCES_CHAIN_ENABLED")
+    sources_dataapi_enabled: bool = Field(True, validation_alias="PMEX_SOURCES_DATAAPI_ENABLED")
+    dataapi_poll_interval_s: int = Field(30, validation_alias="PMEX_DATAAPI_POLL_INTERVAL_S")
+
     clob_base_url: str = Field("https://clob.polymarket.com", validation_alias="PMEX_CLOB_BASE_URL")
     data_api_base_url: str = Field("https://data-api.polymarket.com", validation_alias="PMEX_DATA_API_BASE_URL")
     gamma_api_base_url: str = Field("https://gamma-api.polymarket.com", validation_alias="PMEX_GAMMA_API_BASE_URL")
