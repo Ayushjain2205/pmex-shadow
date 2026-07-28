@@ -45,10 +45,33 @@ class BookSnapshot:
     def vwap_for(self, side: Side, usd: Decimal) -> tuple[Decimal, Decimal]:
         """Walk the book for `usd` notional on `side`; return (vwap_price, shares_filled).
 
-        Implemented in Phase 1 (paper fill simulation, FR-EXE-9). Left unimplemented in
-        Phase 0 — the type exists now so downstream modules can be built against it.
+        A BUY walks the asks (you buy at what sellers are asking); a SELL walks the
+        bids. `shares_filled` may be less than `usd / best_price` if the book is too
+        thin to absorb the full notional — that's the point of simulating this rather
+        than assuming top-of-book fills (design doc §3.4a: this is what tells you
+        whether a target's edge survives your latency and size).
         """
-        raise NotImplementedError("BookSnapshot.vwap_for is implemented in Phase 1")
+        levels = self.asks if side == Side.BUY else self.bids
+        remaining_usd = usd
+        total_shares = Decimal(0)
+        total_cost = Decimal(0)
+        for price, size in levels:
+            if remaining_usd <= 0:
+                break
+            level_usd = price * size
+            if level_usd <= remaining_usd:
+                total_shares += size
+                total_cost += level_usd
+                remaining_usd -= level_usd
+            else:
+                shares_here = remaining_usd / price
+                total_shares += shares_here
+                total_cost += remaining_usd
+                remaining_usd = Decimal(0)
+        if total_shares == 0:
+            return (Decimal(0), Decimal(0))
+        vwap_price = total_cost / total_shares
+        return (vwap_price, total_shares)
 
 
 @dataclass(frozen=True)
