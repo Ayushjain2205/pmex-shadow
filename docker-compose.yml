@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pmex
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: `docker compose run --rm migrate upgrade head`
+  migrate:
+    build: .
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+
+  watcher:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    command: ["watcher"]
+    restart: unless-stopped
+
+  control:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: ["control", "--host", "0.0.0.0", "--port", "8080"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backup:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    command: ["backup", "--schedule", "0 */6 * * *"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
