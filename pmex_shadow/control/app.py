@@ -65,6 +65,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz() -> dict:
         return {"status": "ok", "started_at": app.state.started_at.isoformat(), "writes_enabled": settings.control_allow_writes}
 
+    @app.get("/metrics")
+    async def metrics():
+        from fastapi import Response
+
+        from pmex_shadow.ops.metrics import render_metrics
+
+        body = await render_metrics(settings.database_url)
+        return Response(content=body, media_type="text/plain; version=0.0.4")
+
     @app.get("/")
     async def fleet(request: Request):
         async with app.state.pool.acquire() as conn:
