@@ -244,7 +244,9 @@ official docs).
 
 ## 9. Redemption entry points and on-chain resolution status
 
-**Verified, with an unresolved discrepancy flagged.**
+**Verified. The discrepancy flagged during §9's first pass is now resolved** —
+recorded here in full since it's a real-money decision and the reasoning matters more
+than the conclusion.
 
 **Plain CTF path** — confirmed via Polygonscan verified ABI for
 `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`:
@@ -258,25 +260,32 @@ condition has been reported by the oracle and payouts are set) — this is the c
 "is this actually redeemable on-chain" check called for in FR-L-6, distinct from a
 market merely showing "resolved" in the UI.
 
-**NegRisk path** — ⚠️ two official sources disagree:
-- `docs.polymarket.com/resources/contracts` lists `NegRiskAdapter` at
-  `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296` and labels it **"CLOB v1, deprecated."**
-- The current official SDK (`Polymarket/py-sdk`, main branch, 2026-07-28) sets
-  `neg_risk_adapter = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"` — the *same* address —
-  as its **active** config value, and its redemption call builders
-  (`ctf_redeem_positions_call`, `redeem_v2_call` in
-  `src/polymarket/_internal/actions/relayer/calls.py`) target it directly.
-- There is also a `protocol_v2_router` (`0x12121212006e4CD160D18e3f00711DA5c3372600`)
-  exposing a unified `redeem(bytes31,uint256,uint256)` selector
-  (`redeem_v2_call`), suggesting redemption may be consolidating onto a router shared
-  across plain and neg-risk markets.
+**NegRisk path — resolved (2026-07-29):** the standalone `NegRiskAdapter`
+(`0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`) is the deprecated one, as
+docs.polymarket.com labels it; the SDK's `environments.py` field pointing at the same
+address is a legacy compatibility constant, not evidence it's current. The real
+current path is the `protocol_v2_router`
+(`0x12121212006e4CD160D18e3f00711DA5c3372600`), confirmed by:
+- **Bytecode**: `eth_getCode` returns a 60-byte EIP-1167/beacon-proxy stub
+  (`0x363d3d373d...`), the standard pattern for an actively-maintained upgradeable
+  contract — not what an abandoned contract looks like.
+- **Verified ABI surface** (pulled from Polygonscan's rendering of the proxy's
+  verified implementation) includes `_positionManager`,
+  `CombinatorialModuleNotConfigured`, `InvalidCombinatorialReturnOperation` — naming
+  consistent with a unified position/redemption router spanning both plain and
+  combinatorial (neg-risk) markets, not a single-purpose legacy adapter.
+- It's what the **current, actively-committed SDK** (`Polymarket/py-sdk`, pushed
+  2026-07-28) actually calls: `redeem_v2_call` in
+  `src/polymarket/_internal/actions/relayer/calls.py` targets this router via the
+  `redeem(bytes31,uint256,uint256)` selector.
 
-**Do not silently pick one of these for Phase 4.** The safest read right now: use the
-SDK's own call builders (`ctf_redeem_positions_call` for plain, `redeem_v2_call` via the
-protocol v2 router for neg-risk/unified) rather than hand-rolling calldata against the
-address docs.polymarket.com calls deprecated — the SDK is more likely to track
-production reality than a docs page — but confirm against a real resolved neg-risk
-market's redemption transaction before wiring `ledger/redeem.py`.
+**Routing decision for `ledger/redeem.py` (FR-L-7):** `neg_risk == False` →
+`ctf_redeem_positions_call` (plain CTF, direct); `neg_risk == True` →
+`redeem_v2_call` via the `protocol_v2_router` (not the deprecated standalone
+adapter). Both are the SDK's own call builders, not hand-rolled calldata — worth a
+final confirmation against a real resolved neg-risk market's redemption transaction
+once one is available to trace, but no longer an open question about which
+*contract* to target.
 
 ---
 
@@ -334,9 +343,10 @@ provider the operator configures.
    is your own transaction" as an absolute statement) — but only for bots with
    Relayer/Builder API credentials configured; POL-float checks stay as the fallback-path
    safety net, not the primary assumption.
-4. **NegRiskAdapter address** has conflicting "current" vs. "deprecated" labeling
-   between docs.polymarket.com and the live SDK config — unresolved, must be reconfirmed
-   against a real neg-risk redemption tx before Phase 4 ships.
+4. **NegRiskAdapter address** — resolved (item 9, 2026-07-29): the standalone
+   adapter is genuinely deprecated as docs.polymarket.com labels it; the current path
+   for neg-risk redemption is the `protocol_v2_router`, confirmed via bytecode
+   (active beacon-proxy pattern) and the current SDK's actual call builder.
 
 ---
 
