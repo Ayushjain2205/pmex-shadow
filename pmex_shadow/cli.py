@@ -186,6 +186,12 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
         reconcile_task = None
         redeem_task = None
         try:
+            from pmex_shadow.control.config_write import seed_initial_config
+            from pmex_shadow.watcher.heartbeat import run_heartbeat_loop
+
+            await seed_initial_config(conn, cfg)  # FR-C-3 rule 1: YAML seeds the DB row once; DB is authoritative after
+            bot_heartbeat_task = asyncio.create_task(run_heartbeat_loop(settings.database_url, f"bot:{name}", lambda: {"mode": mode}))
+
             rate_limiter = TokenBucket(rate_per_minute=policy_file.risk.max_orders_per_minute)
 
             if mode == "live":
@@ -253,7 +259,7 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
 
             typer.echo(f"bot '{name}' stopping...")
             await router.stop()
-            for t in (router_task, consumer_task, heartbeat_task):
+            for t in (router_task, consumer_task, heartbeat_task, bot_heartbeat_task):
                 t.cancel()
             for t in (deadman_task, reconcile_task, redeem_task):
                 if t:

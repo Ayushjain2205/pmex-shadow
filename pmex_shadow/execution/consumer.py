@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 from collections import defaultdict
 from decimal import Decimal
@@ -39,6 +40,7 @@ class BotConsumer:
         router: ExecutionRouter,
     ) -> None:
         self.bot = bot
+        self.policy_file = policy_file
         self.policy = policy_file.profiles[bot.policy.profile]
         self.global_risk = policy_file.risk
         self.database_url = database_url
@@ -48,11 +50,14 @@ class BotConsumer:
         self._book_history: dict[str, list[BookSnapshot]] = defaultdict(list)
         self._market_cache: dict[str, object] = {}
         self._target_addresses: set[str] = set()
+        self._config_version: int | None = None
 
     async def run(self) -> None:
         listen_conn = await asyncpg.connect(self.database_url)
         work_conn = await asyncpg.connect(self.database_url)
+        config_conn = await asyncpg.connect(self.database_url)
         await self._refresh_targets(work_conn)
+        await self._load_config_version(config_conn, initial=True)
 
         queue: asyncio.Queue[int] = asyncio.Queue()
 
@@ -61,6 +66,7 @@ class BotConsumer:
 
         await listen_conn.add_listener("pmex_fill", _on_notify)
         logger.info("bot %s consumer listening on pmex_fill for %d target(s)", self.bot.name, len(self._target_addresses))
+        reload_task = asyncio.create_task(self._poll_config_reload(config_conn))
         try:
             while True:
                 fill_id = await queue.get()
@@ -69,9 +75,44 @@ class BotConsumer:
                 except Exception:
                     logger.exception("failed to process fill %d for bot %s", fill_id, self.bot.name)
         finally:
+            reload_task.cancel()
             await listen_conn.remove_listener("pmex_fill", _on_notify)
             await listen_conn.close()
             await work_conn.close()
+            await config_conn.close()
+
+    async def _load_config_version(self, conn: asyncpg.Connection, initial: bool = False) -> None:
+        """FR-C-3: bots poll their active bot_config version and hot-reload. Only
+        the hot-reloadable fields (selectors, policy profile, envelope, mode) are
+        applied here — wallet/targets can't have changed anyway, since
+        control/config_write.py rejects any attempt to change them without a
+        restart (FR-C-5)."""
+        row = await conn.fetchrow("SELECT version, config FROM bot_config WHERE bot_id = $1 AND active", self.bot.name)
+        if row is None:
+            return
+        if not initial and row["version"] == self._config_version:
+            return
+
+        config_dict = row["config"] if isinstance(row["config"], dict) else json.loads(row["config"])
+        try:
+            new_bot = BotConfig.model_validate(config_dict)
+        except Exception:
+            logger.exception("bot %s: active bot_config version %d failed to parse, ignoring", self.bot.name, row["version"])
+            return
+
+        if not initial and row["version"] != self._config_version:
+            logger.info("bot %s: hot-reloaded config v%d -> v%d", self.bot.name, self._config_version, row["version"])
+        self.bot = new_bot
+        self.policy = self.policy_file.profiles[new_bot.policy.profile]
+        self._config_version = row["version"]
+
+    async def _poll_config_reload(self, conn: asyncpg.Connection, interval_s: int = 10) -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self._load_config_version(conn)
+            except Exception:
+                logger.exception("bot %s: config reload check failed", self.bot.name)
 
     async def _refresh_targets(self, conn: asyncpg.Connection) -> None:
         addresses = []
@@ -144,6 +185,14 @@ class BotConsumer:
             return  # duplicate delivery, already processed (FR-EXE-2)
 
         if isinstance(decision, Intent):
+            if target_stats.status == "shadow":
+                # FR-T-4: full pipeline runs and the intent is recorded (just did,
+                # above) but orders are suppressed — a shadow target hasn't earned
+                # trust yet, so it never reaches the router no matter what decide()
+                # said. Not a Skip: the decision was genuinely COPY, we just don't
+                # act on it, which is a different fact worth keeping distinct in intents.
+                logger.debug("shadow target %s: intent recorded, order suppressed", fill.target)
+                return
             await self.router.enqueue(decision, intent_id)
 
     async def _target_position_before(self, conn: asyncpg.Connection, fill: TargetFill, fill_id: int) -> Decimal:
