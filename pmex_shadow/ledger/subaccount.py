@@ -29,14 +29,19 @@ async def get_ledger_state(conn: asyncpg.Connection, bot_id: str, mode: str) -> 
     )
     global_exposure_usd = global_row["total"]
 
-    halted_row = await conn.fetchrow(
-        "SELECT 1 FROM events WHERE bot_id = $1 AND level = 'CRITICAL' AND component = 'ledger.reconcile' "
-        "AND at > now() - interval '1 day' ORDER BY id DESC LIMIT 1",
+    # Halted if the most recent halt-type event (reconcile drift, FR-L-5, or an
+    # explicit killswitch, FR-O-3) is more recent than the most recent resume — never
+    # a time-window heuristic. A halt is sticky until `pmex-shadow bots resume`
+    # explicitly clears it (ops/killswitch.py), not until some interval elapses.
+    last_halt = await conn.fetchrow(
+        "SELECT at FROM events WHERE bot_id = $1 AND level = 'CRITICAL' "
+        "AND component IN ('ledger.reconcile', 'killswitch') ORDER BY at DESC LIMIT 1",
         bot_id,
     )
-    # Halts are sticky only via an explicit resume (ledger/reconcile.py, Phase 4) —
-    # this 24h lookback is a placeholder until that command exists, so a halt doesn't
-    # silently expire on its own overnight.
-    halted = halted_row is not None
+    last_resume = await conn.fetchrow(
+        "SELECT at FROM events WHERE bot_id = $1 AND component = 'killswitch' AND message = 'resumed' ORDER BY at DESC LIMIT 1",
+        bot_id,
+    )
+    halted = last_halt is not None and (last_resume is None or last_halt["at"] > last_resume["at"])
 
     return LedgerState(positions=positions, deployed_usd=deployed_usd, global_exposure_usd=global_exposure_usd, halted=halted)
