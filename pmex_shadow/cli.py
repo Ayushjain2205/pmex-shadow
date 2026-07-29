@@ -326,8 +326,11 @@ app.add_typer(targets_app, name="targets")
 def targets_add(
     address: str,
     alias: str | None = typer.Option(None, "--alias"),
+    shadow_days: int = typer.Option(14, "--shadow-days", help="days in shadow status before eligible to trade (FR-T-4)"),
 ) -> None:
-    """Register a target wallet address for the watcher to track (target_stats)."""
+    """Register a target wallet address for the watcher to track (target_stats).
+    New targets always start in `shadow` — full pipeline, orders suppressed — never
+    live from the first fill (FR-T-4)."""
     import asyncpg
 
     settings = Settings()
@@ -335,19 +338,27 @@ def targets_add(
     async def _add() -> None:
         conn = await asyncpg.connect(settings.database_url)
         try:
+            addr = address.lower()
+            row = await conn.fetchrow("SELECT status FROM target_stats WHERE target = $1", addr)
             await conn.execute(
                 """
                 INSERT INTO target_stats (target, alias, status)
                 VALUES ($1, $2, 'shadow')
                 ON CONFLICT (target) DO UPDATE SET alias = COALESCE(EXCLUDED.alias, target_stats.alias)
                 """,
-                address.lower(), alias,
+                addr, alias,
             )
+            if row is None:  # only log a fresh shadow-start event for genuinely new targets
+                await conn.execute(
+                    "INSERT INTO events (level, component, message, context) VALUES ('INFO', 'targets.onboarding', 'target added, entering shadow', $1)",
+                    f'{{"target": "{addr}", "shadow_days": {shadow_days}}}',
+                )
         finally:
             await conn.close()
 
     asyncio.run(_add())
     typer.secho(f"tracking {address.lower()}" + (f" (alias: {alias})" if alias else ""), fg=typer.colors.GREEN)
+    typer.echo(f"status: shadow for {shadow_days} days (orders suppressed, full pipeline runs)")
     typer.echo("Restart the watcher (or wait for its next reconnect/sweep cycle) to pick it up.")
 
 
@@ -361,7 +372,9 @@ def targets_list() -> None:
     async def _list():
         conn = await asyncpg.connect(settings.database_url)
         try:
-            return await conn.fetch("SELECT target, alias, status, last_fill_at FROM target_stats ORDER BY target")
+            return await conn.fetch(
+                "SELECT target, alias, status, last_fill_at, hit_rate_30d, fills_30d, reversal_rate FROM target_stats ORDER BY target"
+            )
         finally:
             await conn.close()
 
@@ -370,7 +383,181 @@ def targets_list() -> None:
         typer.echo("no targets tracked yet — `pmex-shadow targets add <address>`")
         return
     for r in rows:
-        typer.echo(f"{r['target']}  alias={r['alias'] or '-'}  status={r['status']}  last_fill={r['last_fill_at'] or 'never'}")
+        typer.echo(
+            f"{r['target']}  alias={r['alias'] or '-'}  status={r['status']}  last_fill={r['last_fill_at'] or 'never'}  "
+            f"hit_rate_30d={r['hit_rate_30d'] if r['hit_rate_30d'] is not None else 'n/a'}  fills_30d={r['fills_30d'] or 0}  "
+            f"reversal_rate={r['reversal_rate'] if r['reversal_rate'] is not None else 'n/a'}"
+        )
+
+
+@targets_app.command("pause")
+def targets_pause(address: str) -> None:
+    """Manually pause a target (status=paused_manual). Never auto-un-paused."""
+    import asyncpg
+
+    settings = Settings()
+
+    async def _pause() -> None:
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            result = await conn.execute("UPDATE target_stats SET status = 'paused_manual' WHERE target = $1", address.lower())
+            return result
+        finally:
+            await conn.close()
+
+    result = asyncio.run(_pause())
+    if result == "UPDATE 0":
+        typer.secho(f"{address.lower()} is not tracked", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho(f"paused {address.lower()}", fg=typer.colors.GREEN)
+
+
+@targets_app.command("resume")
+def targets_resume(address: str) -> None:
+    """Resume a paused target (status=active). Explicit operator action only —
+    nothing in this system auto-resumes a paused target."""
+    import asyncpg
+
+    settings = Settings()
+
+    async def _resume() -> None:
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            return await conn.execute("UPDATE target_stats SET status = 'active' WHERE target = $1", address.lower())
+        finally:
+            await conn.close()
+
+    result = asyncio.run(_resume())
+    if result == "UPDATE 0":
+        typer.secho(f"{address.lower()} is not tracked", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho(f"resumed {address.lower()}", fg=typer.colors.GREEN)
+
+
+@targets_app.command("migrate")
+def targets_migrate(old_address: str, new_address: str) -> None:
+    """Reassign a target's history to a new proxy address (FR-T-6) — a target
+    changing wallets, not forking their track record."""
+    import asyncpg
+
+    settings = Settings()
+    old_addr, new_addr = old_address.lower(), new_address.lower()
+
+    async def _migrate() -> None:
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            async with conn.transaction():
+                old_row = await conn.fetchrow("SELECT * FROM target_stats WHERE target = $1", old_addr)
+                if old_row is None:
+                    raise typer.Exit(code=1)
+                await conn.execute("UPDATE target_fills SET target = $2 WHERE target = $1", old_addr, new_addr)
+                await conn.execute(
+                    """
+                    INSERT INTO target_stats (target, alias, size_p50, size_p60, size_p80, size_p95,
+                        fills_30d, hit_rate_30d, pnl_30d_usd, reversal_rate, last_fill_at, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ON CONFLICT (target) DO NOTHING
+                    """,
+                    new_addr, old_row["alias"], old_row["size_p50"], old_row["size_p60"], old_row["size_p80"],
+                    old_row["size_p95"], old_row["fills_30d"], old_row["hit_rate_30d"], old_row["pnl_30d_usd"],
+                    old_row["reversal_rate"], old_row["last_fill_at"], old_row["status"],
+                )
+                await conn.execute("DELETE FROM target_stats WHERE target = $1", old_addr)
+                await conn.execute(
+                    "INSERT INTO events (level, component, message, context) VALUES ('WARN', 'targets.migrate', 'target migrated', $1)",
+                    f'{{"old": "{old_addr}", "new": "{new_addr}"}}',
+                )
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(_migrate())
+    except typer.Exit:
+        typer.secho(f"{old_addr} is not tracked", fg=typer.colors.RED)
+        raise
+    typer.secho(f"migrated {old_addr} -> {new_addr} (history preserved)", fg=typer.colors.GREEN)
+    typer.echo("Update bots/*.yaml targets: lists that reference the old address or alias.")
+
+
+@targets_app.command("recompute")
+def targets_recompute(
+    schedule: str | None = typer.Option(None, "--schedule", help="cron expression; omit to run once"),
+) -> None:
+    """Recompute target_stats (FR-T-1) and apply decay/dormancy auto-pause (FR-T-2,
+    FR-T-3) and shadow-onboarding graduation (FR-T-4)."""
+    import asyncpg
+
+    from pmex_shadow.config import load_policy_file
+    from pmex_shadow.targets.decay import DecayCheckInput, check_decay
+    from pmex_shadow.targets.onboarding import check_onboarding
+    from pmex_shadow.targets.stats import recompute_all_targets
+
+    settings = Settings()
+    policy_file = load_policy_file(POLICY_FILE)
+
+    async def _pass() -> None:
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            n = await recompute_all_targets(conn)
+            rows = await conn.fetch("SELECT * FROM target_stats")
+            now = dt.datetime.now(dt.timezone.utc)
+            for row in rows:
+                new_status = check_decay(DecayCheckInput(
+                    status=row["status"], hit_rate_30d=row["hit_rate_30d"], fills_30d=row["fills_30d"] or 0,
+                    last_fill_at=row["last_fill_at"], now=now,
+                    min_hit_rate=policy_file.targets.decay.min_hit_rate,
+                    min_sample_size=10, dormancy_days=policy_file.targets.dormancy_days,
+                ))
+                if new_status:
+                    await conn.execute("UPDATE target_stats SET status = $2 WHERE target = $1", row["target"], new_status)
+                    await conn.execute(
+                        "INSERT INTO events (level, component, message, context) VALUES ('WARN', 'targets.decay', 'auto-paused', $1)",
+                        f'{{"target": "{row["target"]}", "new_status": "{new_status}"}}',
+                    )
+                    continue
+
+                onboarding_event = await conn.fetchrow(
+                    "SELECT context FROM events WHERE component = 'targets.onboarding' AND context->>'target' = $1 ORDER BY at ASC LIMIT 1",
+                    row["target"],
+                )
+                if onboarding_event:
+                    import json as _json
+
+                    ctx = onboarding_event["context"] if isinstance(onboarding_event["context"], dict) else _json.loads(onboarding_event["context"])
+                    shadow_days = ctx.get("shadow_days", 14)
+                else:
+                    shadow_days = 14
+                graduated = await check_onboarding(conn, row["target"], shadow_days, now)
+                if graduated:
+                    await conn.execute("UPDATE target_stats SET status = $2 WHERE target = $1", row["target"], graduated)
+                    await conn.execute(
+                        "INSERT INTO events (level, component, message) VALUES ($1, 'targets.onboarding', 'graduated from shadow to active')",
+                        row["target"],
+                    )
+            return n
+        finally:
+            await conn.close()
+
+    if schedule:
+        from croniter import croniter
+
+        async def _loop():
+            itr = croniter(schedule, dt.datetime.now(dt.timezone.utc))
+            while True:
+                next_run = itr.get_next(dt.datetime)
+                sleep_s = (next_run - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                if sleep_s > 0:
+                    await asyncio.sleep(sleep_s)
+                try:
+                    n = await _pass()
+                    typer.echo(f"recomputed {n} target(s)")
+                except Exception:
+                    logging.getLogger("pmex_shadow.targets").exception("recompute pass failed")
+
+        asyncio.run(_loop())
+    else:
+        n = asyncio.run(_pass())
+        typer.secho(f"recomputed {n} target(s)", fg=typer.colors.GREEN)
 
 
 @app.command()
