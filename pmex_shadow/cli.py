@@ -678,6 +678,149 @@ def backup(
         typer.secho(f"backup written: {path}", fg=typer.colors.GREEN)
 
 
+@bot_app.command("overlap")
+def bots_overlap() -> None:
+    """FR-O-7: report bot pairs sharing targets with intersecting selectors, and
+    their combined exposure. Not checked automatically at `bot new` time — a fresh
+    scaffold always has an empty targets: [] until the operator edits the YAML, so
+    there's nothing to overlap with yet; run this after configuring targets instead.
+    """
+    from pmex_shadow.ops.compose_gen import compute_overlaps, load_all_bots
+
+    bots = load_all_bots(BOTS_DIR)
+    overlaps = compute_overlaps(bots)
+    if not overlaps:
+        typer.echo("no overlaps detected")
+        return
+    for o in overlaps:
+        typer.secho(
+            f"{o['bot_a']} overlaps {o['bot_b']} on {len(o['shared_targets'])} target(s) "
+            f"({', '.join(o['shared_targets'])}) — combined exposure ${o['combined_exposure_usd']}",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@bot_app.command("resume")
+def bot_resume(name: str) -> None:
+    """Clear a halt (reconcile drift or killswitch) — explicit operator action only,
+    nothing in this system auto-resumes."""
+    import asyncpg
+
+    from pmex_shadow.ops.killswitch import resume_bot
+
+    settings = Settings()
+
+    async def _resume():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            await resume_bot(conn, name)
+        finally:
+            await conn.close()
+
+    asyncio.run(_resume())
+    typer.secho(f"resumed {name}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def panic(
+    bot: str | None = typer.Option(None, "--bot", help="halt only this bot; omit for all"),
+    flatten: bool = typer.Option(False, "--flatten", help="also cancel resting orders (does NOT auto-liquidate positions)"),
+    reason: str = typer.Option("manual panic", "--reason"),
+) -> None:
+    """Halt every bot, or one (FR-O-3). Halting stops new order generation
+    immediately (decide() checks ledger.halted on every fill) — resuming is always
+    a separate, explicit `bot resume`."""
+    import asyncpg
+
+    from pmex_shadow.ops.killswitch import cancel_resting_orders, halt_all, halt_bot
+
+    settings = Settings()
+
+    async def _panic():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            if bot:
+                await halt_bot(conn, bot, reason, flatten)
+                halted = [bot]
+            else:
+                halted = await halt_all(conn, reason, flatten)
+        finally:
+            await conn.close()
+        return halted
+
+    halted = asyncio.run(_panic())
+    typer.secho(f"halted: {', '.join(halted)}", fg=typer.colors.RED)
+
+    if flatten:
+        for bot_id in halted:
+            bot_yaml_path = BOTS_DIR / f"{bot_id}.yaml"
+            if not bot_yaml_path.exists():
+                continue
+            cfg = load_bot_config(bot_yaml_path)
+            ok = asyncio.run(cancel_resting_orders(
+                bot_id, cfg.wallet.funder_env, cfg.wallet.pk_env, bot_id.upper(), settings.clob_base_url,
+            ))
+            if ok:
+                typer.secho(f"  {bot_id}: resting orders cancelled", fg=typer.colors.YELLOW)
+            else:
+                typer.secho(f"  {bot_id}: no live credentials in environment — nothing to cancel (paper mode, or run this from the bot's own context)", fg=typer.colors.YELLOW)
+        typer.echo("Open positions were NOT auto-liquidated — flatten cancels resting orders only. Review and close positions manually if intended.")
+
+
+@app.command()
+def export(
+    kind: str = typer.Option("fills", "--kind", help="fills or pnl"),
+    since: str = typer.Option("2026-01-01", "--since"),
+    output: Path = typer.Option(Path("export.csv"), "--output"),
+) -> None:
+    """CSV export of fills or realized PnL — for taxes (design doc §3.7)."""
+    import asyncpg
+    import dateutil.parser
+
+    from pmex_shadow.research.export import export_fills_csv, export_pnl_csv
+
+    settings = Settings()
+    since_dt = dateutil.parser.isoparse(since)
+    if since_dt.tzinfo is None:
+        since_dt = since_dt.replace(tzinfo=dt.timezone.utc)
+
+    async def _export():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            if kind == "fills":
+                return await export_fills_csv(conn, since_dt)
+            elif kind == "pnl":
+                return await export_pnl_csv(conn, since_dt)
+            else:
+                typer.secho(f"unknown --kind {kind!r}, expected fills or pnl", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+        finally:
+            await conn.close()
+
+    csv_text = asyncio.run(_export())
+    output.write_text(csv_text)
+    typer.secho(f"wrote {output}", fg=typer.colors.GREEN)
+
+
+compose_app = typer.Typer(help="Generate compose files from bots/*.yaml")
+app.add_typer(compose_app, name="compose")
+
+
+@compose_app.command("generate")
+def compose_generate() -> None:
+    """bots/*.yaml -> docker-compose.bots.yml. Adding a bot is dropping a YAML and
+    regenerating — never hand-edit the output."""
+    from pmex_shadow.ops.compose_gen import generate_compose, load_all_bots
+
+    bots = load_all_bots(BOTS_DIR)
+    if not bots:
+        typer.echo("no bots configured yet — nothing to generate")
+        return
+    output = generate_compose(bots)
+    Path("docker-compose.bots.yml").write_text(output)
+    typer.secho(f"wrote docker-compose.bots.yml ({len(bots)} bot service(s))", fg=typer.colors.GREEN)
+
+
 _DEFAULT_POLICY_YAML = """\
 # Conservative defaults — someone will clone this and run it without reading further.
 profiles:
