@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import os
 import stat
@@ -267,6 +268,84 @@ def targets_list() -> None:
         return
     for r in rows:
         typer.echo(f"{r['target']}  alias={r['alias'] or '-'}  status={r['status']}  last_fill={r['last_fill_at'] or 'never'}")
+
+
+@app.command()
+def replay(
+    config: Path = typer.Option(..., "--config", help="candidate bot YAML"),
+    from_: str = typer.Option(..., "--from", help="ISO date/datetime"),
+    to: str = typer.Option(..., "--to", help="ISO date/datetime"),
+) -> None:
+    """Rerun stored fills through policy with zero side effects (§10 Determinism)."""
+    import dateutil.parser
+
+    from pmex_shadow.config import load_policy_file
+    from pmex_shadow.models import Intent, Skip
+    from pmex_shadow.research.replay import run_replay
+
+    settings = Settings()
+    bot = load_bot_config(config)
+    policy_file = load_policy_file(POLICY_FILE)
+    from_ts = dateutil.parser.isoparse(from_)
+    to_ts = dateutil.parser.isoparse(to)
+
+    decisions = asyncio.run(run_replay(settings.database_url, settings.gamma_api_base_url, bot, policy_file, from_ts, to_ts))
+
+    intents = [d for d in decisions if isinstance(d, Intent)]
+    skips = [d for d in decisions if isinstance(d, Skip)]
+    typer.echo(f"{len(decisions)} decisions: {len(intents)} COPY, {len(skips)} SKIP")
+    by_reason: dict[str, int] = {}
+    for s in skips:
+        by_reason[s.reason] = by_reason.get(s.reason, 0) + 1
+    for reason, count in sorted(by_reason.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"  skip[{reason}]: {count}")
+    if intents:
+        total_usd = sum((i.notional_usd for i in intents), start=intents[0].notional_usd * 0)
+        typer.echo(f"  total hypothetical notional: ${total_usd}")
+
+
+@app.command()
+def analyze(
+    since: str = typer.Option("14d", "--since", help="e.g. 14d, or an ISO date"),
+) -> None:
+    """Per-target scorecards and pairwise correlation (design doc §3.7)."""
+    import asyncpg
+
+    from pmex_shadow.research.analyze import pairwise_correlation, target_scorecards
+
+    settings = Settings()
+    since_dt = _parse_since(since)
+
+    async def _run():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            return await target_scorecards(conn, since_dt), await pairwise_correlation(conn, since_dt)
+        finally:
+            await conn.close()
+
+    scorecards, correlations = asyncio.run(_run())
+
+    typer.echo(f"=== Target scorecards (since {since_dt.isoformat()}) ===")
+    for sc in scorecards:
+        typer.echo(
+            f"{sc.alias or sc.target}  fills={sc.fills}  status={sc.status}  "
+            f"avg_latency={f'{sc.avg_detection_latency_s:.1f}s' if sc.avg_detection_latency_s else 'n/a'}  "
+            f"avg_slippage={sc.avg_slippage_vs_target if sc.avg_slippage_vs_target is not None else 'n/a'}  "
+            f"hit_rate_30d={sc.hit_rate_30d if sc.hit_rate_30d is not None else 'n/a (Phase 5)'}"
+        )
+
+    if correlations:
+        typer.echo("\n=== Correlated target pairs (same side, same token, within 5s) ===")
+        for c in correlations:
+            typer.echo(f"{c.target_a} <-> {c.target_b}: {c.co_occurrences} co-occurrences (out of {c.total_a}/{c.total_b} total fills)")
+
+
+def _parse_since(since: str) -> dt.datetime:
+    if since.endswith("d") and since[:-1].isdigit():
+        return dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(since[:-1]))
+    import dateutil.parser
+
+    return dateutil.parser.isoparse(since)
 
 
 @app.command()
