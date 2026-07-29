@@ -1,20 +1,29 @@
-"""Control plane (FR-C-*). Phase 0: stub app that enforces the binding security
-defaults from day one — FR-C-7 (no default credentials, refuse to start without an
-auth secret) and FR-C-8 (read-only unless writes are explicitly enabled) — since those
-are cheap to get right early and expensive to retrofit onto a running dashboard.
+"""Control plane (FR-C-*). Binds 127.0.0.1 by default, refuses to start without an
+auth secret (FR-C-7), and is read-only unless writes are explicitly enabled
+(FR-C-8) — enforced at the middleware layer so no individual route can accidentally
+bypass it. Treasury endpoints do not exist here at all, in the web app or otherwise
+(design doc §2.2: "never in the web UI") — there is no route for it, not a disabled one.
 
-Screens (fleet view, bot detail, targets, params) ship in Phase 6.
+Screens: fleet view, bot detail, targets, params (FR-C-2). Financial figures are
+queried straight from Postgres (control/queries.py, FR-C-1) — this module never
+touches Prometheus.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import sys
+from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+import asyncpg
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 
 from pmex_shadow.config import Settings
+from pmex_shadow.control import config_write, queries
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -30,6 +39,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="pmex-shadow control")
     app.state.settings = settings
     app.state.started_at = dt.datetime.now(dt.timezone.utc)
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+    @app.on_event("startup")
+    async def _startup() -> None:
+        app.state.pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=5)
+
+    @app.on_event("shutdown")
+    async def _shutdown() -> None:
+        await app.state.pool.close()
 
     @app.middleware("http")
     async def _block_writes_by_default(request: Request, call_next):
@@ -40,17 +58,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await call_next(request)
 
+    def _ctx(request: Request, **extra) -> dict:
+        return {"request": request, "writes_enabled": settings.control_allow_writes, **extra}
+
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {
-            "status": "ok",
-            "started_at": app.state.started_at.isoformat(),
-            "writes_enabled": settings.control_allow_writes,
-            "note": "Phase 0 stub — fleet/bot/targets/params screens ship in Phase 6",
-        }
+        return {"status": "ok", "started_at": app.state.started_at.isoformat(), "writes_enabled": settings.control_allow_writes}
 
     @app.get("/")
-    async def root() -> dict:
-        return {"service": "pmex-shadow control", "status": "stub — see /healthz"}
+    async def fleet(request: Request):
+        async with app.state.pool.acquire() as conn:
+            bots = await queries.fleet_view(conn)
+        return templates.TemplateResponse(request, "fleet.html", _ctx(request, bots=bots, active_nav="fleet"))
+
+    @app.get("/bots/{bot_id}")
+    async def bot_detail(request: Request, bot_id: str):
+        async with app.state.pool.acquire() as conn:
+            detail = await queries.bot_detail(conn, bot_id)
+        return templates.TemplateResponse(request, "bot_detail.html", _ctx(request, bot_id=bot_id, active_nav="fleet", **detail))
+
+    @app.get("/targets")
+    async def targets(request: Request):
+        async with app.state.pool.acquire() as conn:
+            rows = await queries.targets_view(conn)
+        return templates.TemplateResponse(request, "targets.html", _ctx(request, targets=rows, active_nav="targets"))
+
+    @app.get("/logs")
+    async def logs(request: Request, bot_id: str | None = None):
+        async with app.state.pool.acquire() as conn:
+            rows = await queries.logs_view(conn, bot_id)
+        return templates.TemplateResponse(request, "logs.html", _ctx(request, logs=rows, active_nav="logs"))
+
+    @app.get("/bots/{bot_id}/params")
+    async def params_form(request: Request, bot_id: str, message: str | None = None, applied: bool | None = None):
+        async with app.state.pool.acquire() as conn:
+            current = await config_write.get_active_config(conn, bot_id)
+            audit = await conn.fetch(
+                "SELECT actor, from_version, to_version, outcome, reason, at FROM config_audit WHERE bot_id = $1 ORDER BY at DESC LIMIT 20",
+                bot_id,
+            )
+        if current is None:
+            return templates.TemplateResponse(request, "logs.html", _ctx(request, logs=[], active_nav="fleet"), status_code=404)
+        return templates.TemplateResponse(
+            request, "params.html",
+            _ctx(request, bot_id=bot_id, config=current["config"], version=current["version"], audit=audit, message=message, applied=applied),
+        )
+
+    @app.post("/bots/{bot_id}/params")
+    async def params_submit(
+        request: Request, bot_id: str,
+        mode: str = Form(...), policy_profile: str = Form(...), envelope_usd: str = Form(...), categories: str = Form(""),
+    ):
+        async with app.state.pool.acquire() as conn:
+            current = await config_write.get_active_config(conn, bot_id)
+            if current is None:
+                return RedirectResponse(f"/bots/{bot_id}/params?applied=false&message=bot+not+found", status_code=303)
+            new_config = dict(current["config"])
+            new_config["mode"] = mode
+            new_config["policy"] = {"profile": policy_profile}
+            new_config["risk"] = {"envelope_usd": envelope_usd}
+            cats = [c.strip() for c in categories.split(",") if c.strip()]
+            new_config["selectors"] = {**current["config"].get("selectors", {}), "categories": cats or None}
+
+            applied, message = await config_write.propose_config_update(conn, bot_id, actor="control-ui", new_config_dict=new_config)
+        return RedirectResponse(f"/bots/{bot_id}/params?applied={str(applied).lower()}&message={message}", status_code=303)
 
     return app

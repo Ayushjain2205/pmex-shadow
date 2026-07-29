@@ -24,6 +24,7 @@ dependencies = [
     "websockets>=13.0",
     "eth-abi>=5.1",
     "python-dateutil>=2.9",
+    "python-multipart>=0.0.12",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +42,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["pmex_shadow*"]
+
+[tool.setuptools.package-data]
+# setuptools only ships .py files by default -- templates/static are data files and
+# need declaring explicitly, or they silently vanish from the installed wheel (found
+# via a live TemplateNotFound in the built Docker image, not by reading the config).
+pmex_shadow = ["control/templates/*.html", "control/static/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

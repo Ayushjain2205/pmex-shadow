@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Targets — pmex-shadow{% endblock %}
+{% block content %}
+<h1>Targets</h1>
+{% if not targets %}
+<p>No targets tracked yet. Run <code>pmex-shadow targets add &lt;address&gt;</code>.</p>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Target</th><th>Status</th><th>p50</th><th>p80</th><th>p95</th><th>Fills (30d)</th><th>Hit rate (30d)</th><th>PnL (30d)</th><th>Reversal rate</th><th>Last fill</th></tr>
+  </thead>
+  <tbody>
+    {% for t in targets %}
+    <tr>
+      <td><strong>{{ t.alias or t.target[:10] + "…" }}</strong><br><code style="font-size:0.7rem;opacity:0.5">{{ t.target }}</code></td>
+      <td><span class="pill pill-{{ t.status }}">{{ t.status }}</span></td>
+      <td>{{ "%.2f"|format(t.size_p50) if t.size_p50 else "—" }}</td>
+      <td>{{ "%.2f"|format(t.size_p80) if t.size_p80 else "—" }}</td>
+      <td>{{ "%.2f"|format(t.size_p95) if t.size_p95 else "—" }}</td>
+      <td>{{ t.fills_30d or 0 }}</td>
+      <td>{{ "%.0f%%"|format(t.hit_rate_30d * 100) if t.hit_rate_30d is not none else "—" }}</td>
+      <td style="color: {{ 'inherit' if not t.pnl_30d_usd else ('#16a34a' if t.pnl_30d_usd > 0 else '#dc2626') }}">{{ "$%.2f"|format(t.pnl_30d_usd) if t.pnl_30d_usd is not none else "—" }}</td>
+      <td>{{ "%.0f%%"|format(t.reversal_rate * 100) if t.reversal_rate is not none else "—" }}</td>
+      <td>{{ t.last_fill_at.strftime("%Y-%m-%d %H:%M") if t.last_fill_at else "never" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

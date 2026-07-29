@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{{ bot_id }} — pmex-shadow{% endblock %}
+{% block content %}
+<p><a href="/">← Fleet</a></p>
+<h1>{{ bot_id }} <a href="/bots/{{ bot_id }}/params" class="button" style="font-size: 0.9rem;">params →</a></h1>
+
+<div class="card">
+  <h3>Positions</h3>
+  {% if not positions %}<p>No positions.</p>{% else %}
+  <table>
+    <thead><tr><th>Token</th><th>Shares</th><th>Cost basis</th><th>Realized PnL</th><th>Lifecycle</th></tr></thead>
+    <tbody>
+      {% for p in positions %}
+      <tr>
+        <td><code>{{ p.token_id[:16] }}…</code></td>
+        <td>{{ "%.4f"|format(p.shares) }}</td>
+        <td>${{ "%.2f"|format(p.cost_basis_usd) }}</td>
+        <td>${{ "%.2f"|format(p.realized_pnl_usd) }}</td>
+        <td><span class="pill pill-{{ p.lifecycle }}">{{ p.lifecycle }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Skips by reason (7d)</h3>
+  {% if not skips_by_reason %}<p>No skips recorded.</p>{% else %}
+  <table>
+    <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+    <tbody>
+      {% for s in skips_by_reason %}
+      <tr><td>{{ s.skip_reason }}</td><td>{{ s.n }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Recent decisions</h3>
+  {% if not recent_intents %}<p>No decisions yet.</p>{% else %}
+  <table>
+    <thead><tr><th>Decision</th><th>Token</th><th>Side</th><th>Target price</th><th>Our price</th><th>Shares</th><th>Percentile</th><th>At</th></tr></thead>
+    <tbody>
+      {% for i in recent_intents %}
+      <tr>
+        <td><span class="pill pill-{{ i.decision }}">{{ i.decision }}{% if i.skip_reason %}: {{ i.skip_reason }}{% endif %}</span></td>
+        <td><code>{{ i.token_id[:12] }}…</code></td>
+        <td>{{ i.side }}</td>
+        <td>{{ i.target_price }}</td>
+        <td>{{ i.intended_price if i.intended_price else "—" }}</td>
+        <td>{{ i.intended_shares if i.intended_shares else "—" }}</td>
+        <td>{{ "%.1f"|format(i.target_percentile) if i.target_percentile is not none else "—" }}</td>
+        <td>{{ i.created_at.strftime("%H:%M:%S") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Log tail</h3>
+  {% if not logs %}<p>No log entries.</p>{% else %}
+  <table>
+    <thead><tr><th>Level</th><th>Component</th><th>Message</th><th>At</th></tr></thead>
+    <tbody>
+      {% for l in logs %}
+      <tr>
+        <td><span class="pill pill-{{ l.level }}">{{ l.level }}</span></td>
+        <td>{{ l.component }}</td>
+        <td>{{ l.message }}</td>
+        <td>{{ l.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ bot_id }} params — pmex-shadow{% endblock %}
+{% block content %}
+<p><a href="/bots/{{ bot_id }}">← {{ bot_id }}</a></p>
+<h1>{{ bot_id }} — Parameters</h1>
+<p style="opacity:0.7">Version {{ version }}. Fields marked <em>restart required</em> are not hot-reloadable (FR-C-5) and are disabled here — edit <code>bots/{{ bot_id }}.yaml</code> and restart the bot instead.</p>
+
+{% if message %}
+<div class="banner {{ 'banner-success' if applied else 'banner-error' }}">{{ message }}</div>
+{% endif %}
+
+<form method="post" action="/bots/{{ bot_id }}/params" class="card">
+  <label>Name <span style="opacity:0.5">(restart required)</span></label>
+  <input type="text" value="{{ config.name }}" disabled>
+
+  <label>Wallet <span style="opacity:0.5">(restart required)</span></label>
+  <input type="text" value="funder_env: {{ config.wallet.funder_env }} / pk_env: {{ config.wallet.pk_env }}" disabled style="width: 100%;">
+
+  <label>Targets <span style="opacity:0.5">(restart required)</span></label>
+  <input type="text" value="{{ config.targets | join(', ') }}" disabled style="width: 100%;">
+
+  <label>Mode</label>
+  <select name="mode" {{ "disabled" if not writes_enabled }}>
+    {% for m in ["watch", "paper", "live"] %}
+    <option value="{{ m }}" {{ "selected" if config.mode == m }}>{{ m }}</option>
+    {% endfor %}
+  </select>
+  <div class="field-hint">Changing to <code>live</code> here does NOT enable live trading by itself — the live-mode interlock (FR-O-5) still requires the <code>--live</code> flag and I_UNDERSTAND_THIS_TRADES_REAL_FUNDS at process start.</div>
+
+  <label>Policy profile</label>
+  <input type="text" name="policy_profile" value="{{ config.policy.profile }}" {{ "disabled" if not writes_enabled }}>
+
+  <label>Envelope (USD)</label>
+  <input type="text" name="envelope_usd" value="{{ config.risk.envelope_usd }}" {{ "disabled" if not writes_enabled }}>
+
+  <label>Category selector (comma-separated, blank = no constraint)</label>
+  <input type="text" name="categories" value="{{ (config.selectors.categories or []) | join(', ') }}" {{ "disabled" if not writes_enabled }} style="width: 100%;">
+
+  <div style="margin-top: 1.5rem;">
+    {% if writes_enabled %}
+    <button type="submit">Apply</button>
+    {% else %}
+    <button type="button" disabled title="read-only">Apply (read-only)</button>
+    {% endif %}
+  </div>
+</form>
+
+<div class="card">
+  <h3>Config audit history</h3>
+  {% if not audit %}<p>No changes recorded.</p>{% else %}
+  <table>
+    <thead><tr><th>At</th><th>Actor</th><th>From</th><th>To</th><th>Outcome</th><th>Reason</th></tr></thead>
+    <tbody>
+      {% for a in audit %}
+      <tr>
+        <td>{{ a.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+        <td>{{ a.actor }}</td>
+        <td>{{ a.from_version if a.from_version is not none else "—" }}</td>
+        <td>{{ a.to_version }}</td>
+        <td><span class="pill pill-{{ a.outcome }}">{{ a.outcome }}</span></td>
+        <td>{{ a.reason or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

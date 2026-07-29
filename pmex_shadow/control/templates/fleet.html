@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Fleet — pmex-shadow{% endblock %}
+{% block content %}
+<h1>Fleet</h1>
+{% if not bots %}
+<p>No bots configured yet. Run <code>pmex-shadow bot new &lt;name&gt;</code> and start it with <code>pmex-shadow bot run &lt;name&gt;</code>.</p>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Bot</th><th>Mode</th><th>Envelope</th><th>Deployed</th><th>Today's PnL</th><th>Skip rate (24h)</th><th>Last fill</th><th>Heartbeat</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for b in bots %}
+    <tr>
+      <td><strong>{{ b.bot_id }}</strong></td>
+      <td><span class="pill pill-{{ b.mode }}">{{ b.mode }}</span></td>
+      <td>${{ "%.2f"|format(b.envelope_usd|float) if b.envelope_usd else "—" }}</td>
+      <td>${{ "%.2f"|format(b.deployed_usd) }}</td>
+      <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#16a34a' if b.today_pnl_usd > 0 else '#dc2626') }}">${{ "%.2f"|format(b.today_pnl_usd) }}</td>
+      <td>{{ "%.0f%%"|format(b.skip_rate_24h * 100) if b.skip_rate_24h is not none else "—" }}</td>
+      <td>{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") if b.last_fill_at else "never" }}</td>
+      <td>{{ b.heartbeat_at.strftime("%H:%M:%S") if b.heartbeat_at else "—" }}</td>
+      <td><a href="/bots/{{ b.bot_id }}">view →</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
