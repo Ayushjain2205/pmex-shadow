@@ -134,17 +134,25 @@ def bot_new(
 
 @bot_app.command("run")
 def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
-    """Run a bot. Phase 1: watcher-heartbeat supervision only (FR-EXE-8) — halts
-    itself when the shared watcher goes stale. Selection/sizing/execution ship in
-    Phases 2-3; this is deliberately not a full trading loop yet.
+    """Run a bot: consume fills, decide, and (paper-simulate or, in live mode,
+    actually submit) orders. Also supervises the shared watcher's heartbeat and
+    halts if it goes stale (FR-EXE-8).
+
+    Live-mode interlock (FR-O-5) — three independent conditions, checked here in one
+    place so no code path can accidentally trade live by skipping it:
+    `mode: live` in bots/<name>.yaml, the `--live` flag, and a non-empty
+    I_UNDERSTAND_THIS_TRADES_REAL_FUNDS. Any missing -> refuse to start, naming which.
     """
+    import os
+
     import asyncpg
 
-    from pmex_shadow.ops.health import heartbeat_age
-
-    if live:
-        typer.secho("--live is not available before Phase 3's execution router exists", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+    from pmex_shadow.config import load_policy_file
+    from pmex_shadow.execution.clob import ClobClient
+    from pmex_shadow.execution.consumer import BotConsumer
+    from pmex_shadow.execution.deadman import DeadmanSwitch
+    from pmex_shadow.execution.ratelimit import TokenBucket
+    from pmex_shadow.execution.router import ExecutionRouter
 
     bot_yaml_path = BOTS_DIR / f"{name}.yaml"
     if not bot_yaml_path.exists():
@@ -152,32 +160,110 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
         raise typer.Exit(code=1)
     cfg = load_bot_config(bot_yaml_path)
     settings = Settings()
+    policy_file = load_policy_file(POLICY_FILE)
+
+    if live:
+        missing = []
+        if cfg.mode != "live":
+            missing.append(f"bots/{name}.yaml has mode: {cfg.mode!r}, not mode: live")
+        if not settings.i_understand_this_trades_real_funds:
+            missing.append("I_UNDERSTAND_THIS_TRADES_REAL_FUNDS is not set")
+        if missing:
+            typer.secho("Refusing to start in live mode — missing:", fg=typer.colors.RED)
+            for m in missing:
+                typer.secho(f"  - {m}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+    elif cfg.mode == "live":
+        typer.secho(f"bots/{name}.yaml has mode: live but --live was not passed — refusing to start (would silently run a live-configured bot in a lesser mode)", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    mode = cfg.mode
 
     async def _run() -> None:
         conn = await asyncpg.connect(settings.database_url)
+        clob = None
+        deadman_task = None
         try:
-            typer.echo(f"bot '{cfg.name}' supervising watcher heartbeat (halts if stale > {settings.watcher_stale_s}s)")
-            while True:
-                age = await heartbeat_age(conn, "watcher")
-                if age is None:
-                    await conn.execute(
-                        "INSERT INTO events (bot_id, level, component, message) VALUES ($1, 'CRITICAL', 'bot.health', 'watcher has never reported a heartbeat')",
-                        cfg.name,
-                    )
-                    typer.secho("HALTED: watcher has never reported a heartbeat", fg=typer.colors.RED)
+            rate_limiter = TokenBucket(rate_per_minute=policy_file.risk.max_orders_per_minute)
+
+            if mode == "live":
+                pk = os.environ.get(cfg.wallet.pk_env)
+                funder = os.environ.get(cfg.wallet.funder_env)
+                api_key = os.environ.get(f"{name.upper()}_API_KEY")
+                api_secret = os.environ.get(f"{name.upper()}_API_SECRET")
+                api_passphrase = os.environ.get(f"{name.upper()}_API_PASSPHRASE")
+                if not all([pk, funder, api_key, api_secret, api_passphrase]):
+                    typer.secho(f"live mode: missing credentials in secrets/{name}.env (wallet or API key/secret/passphrase)", fg=typer.colors.RED)
                     raise typer.Exit(code=1)
-                if age.total_seconds() > settings.watcher_stale_s:
-                    await conn.execute(
-                        "INSERT INTO events (bot_id, level, component, message, context) VALUES ($1, 'CRITICAL', 'bot.health', 'watcher heartbeat stale, halting', $2)",
-                        cfg.name, f'{{"age_s": {age.total_seconds():.1f}}}',
-                    )
-                    typer.secho(f"HALTED: watcher heartbeat is {age.total_seconds():.1f}s old (limit {settings.watcher_stale_s}s)", fg=typer.colors.RED)
-                    raise typer.Exit(code=1)
-                await asyncio.sleep(5)
+                clob = await ClobClient.create(private_key=pk, wallet=funder, api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
+
+                deadman = DeadmanSwitch(
+                    clob_base_url=settings.clob_base_url, bot_id=name, api_key=api_key, api_secret=api_secret,
+                    api_passphrase=api_passphrase, address=funder, timeout_s=settings.deadman_timeout_s,
+                )
+
+                async def _on_trip():
+                    await clob.cancel_all()
+
+                deadman_task = asyncio.create_task(deadman.run(settings.database_url, _on_trip))
+
+            router = ExecutionRouter(
+                bot_id=name, mode=mode, database_url=settings.database_url, clob_base_url=settings.clob_base_url,
+                clob=clob, rate_limiter=rate_limiter, submit_timeout_s=10,
+            )
+            consumer = BotConsumer(
+                bot=cfg, policy_file=policy_file, database_url=settings.database_url,
+                gamma_api_base_url=settings.gamma_api_base_url, clob_base_url=settings.clob_base_url, router=router,
+            )
+
+            router_task = asyncio.create_task(router.run())
+            consumer_task = asyncio.create_task(consumer.run())
+
+            stop_event = asyncio.Event()
+
+            def _handle_sigterm() -> None:
+                stop_event.set()
+
+            loop = asyncio.get_running_loop()
+            import signal
+
+            loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+
+            typer.echo(f"bot '{name}' running (mode={mode}, live_interlock={'satisfied' if live else 'n/a'})")
+
+            heartbeat_task = asyncio.create_task(_supervise_watcher_heartbeat(conn, name, settings.watcher_stale_s, stop_event))
+
+            await stop_event.wait()
+
+            typer.echo(f"bot '{name}' stopping...")
+            await router.stop()
+            for t in (router_task, consumer_task, heartbeat_task):
+                t.cancel()
+            if deadman_task:
+                deadman_task.cancel()
         finally:
+            if clob is not None:
+                await clob.close()
             await conn.close()
 
     asyncio.run(_run())
+
+
+async def _supervise_watcher_heartbeat(conn, bot_id: str, watcher_stale_s: int, stop_event: "asyncio.Event") -> None:
+    from pmex_shadow.ops.health import heartbeat_age
+
+    while True:
+        age = await heartbeat_age(conn, "watcher")
+        if age is None or age.total_seconds() > watcher_stale_s:
+            detail = "never reported" if age is None else f"{age.total_seconds():.1f}s old (limit {watcher_stale_s}s)"
+            await conn.execute(
+                "INSERT INTO events (bot_id, level, component, message, context) VALUES ($1, 'CRITICAL', 'bot.health', 'watcher heartbeat stale, halting', $2)",
+                bot_id, f'{{"detail": "{detail}"}}',
+            )
+            typer.secho(f"HALTED: watcher heartbeat {detail}", fg=typer.colors.RED)
+            stop_event.set()
+            return
+        await asyncio.sleep(5)
 
 
 @app.command()
