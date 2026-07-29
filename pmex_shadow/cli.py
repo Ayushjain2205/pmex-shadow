@@ -183,6 +183,8 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
         conn = await asyncpg.connect(settings.database_url)
         clob = None
         deadman_task = None
+        reconcile_task = None
+        redeem_task = None
         try:
             rate_limiter = TokenBucket(rate_per_minute=policy_file.risk.max_orders_per_minute)
 
@@ -206,6 +208,20 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
                     await clob.cancel_all()
 
                 deadman_task = asyncio.create_task(deadman.run(settings.database_url, _on_trip))
+
+                from pmex_shadow.ledger.reconcile import run_reconcile_loop
+                from pmex_shadow.ledger.redeem import run_redeem_loop
+
+                reconcile_task = asyncio.create_task(run_reconcile_loop(
+                    settings.database_url, name, funder, mode, policy_file.risk.halt_on_reconcile_drift_usd, interval_s=60,
+                ))
+                if not settings.polygon_rpc_url:
+                    typer.secho("POLYGON_RPC_URL not set — redemption's POL-balance safety check cannot run; redeem loop disabled", fg=typer.colors.YELLOW)
+                else:
+                    redeem_task = asyncio.create_task(run_redeem_loop(
+                        settings.database_url, name, funder, mode, settings.polygon_rpc_url,
+                        policy_file.exits.redeem_retry_days, clob.sdk_client, interval_s=3600,
+                    ))
 
             router = ExecutionRouter(
                 bot_id=name, mode=mode, database_url=settings.database_url, clob_base_url=settings.clob_base_url,
@@ -239,8 +255,9 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
             await router.stop()
             for t in (router_task, consumer_task, heartbeat_task):
                 t.cancel()
-            if deadman_task:
-                deadman_task.cancel()
+            for t in (deadman_task, reconcile_task, redeem_task):
+                if t:
+                    t.cancel()
         finally:
             if clob is not None:
                 await clob.close()

@@ -39,6 +39,13 @@ class ClobClient:
     def __init__(self, client: AsyncSecureClient) -> None:
         self._client = client
 
+    @property
+    def sdk_client(self) -> AsyncSecureClient:
+        """Escape hatch for SDK operations this thin wrapper doesn't cover yet
+        (e.g. redemption in ledger/redeem.py) — deliberately public, not a private
+        attribute reach-in, since Phase 4+ genuinely needs the full client surface."""
+        return self._client
+
     @classmethod
     async def create(cls, *, private_key: str, wallet: str, api_key: str, api_secret: str, api_passphrase: str) -> "ClobClient":
         credentials = ApiKeyCreds(apiKey=api_key, secret=api_secret, passphrase=api_passphrase)
