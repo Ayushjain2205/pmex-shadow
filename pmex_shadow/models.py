@@ -75,6 +75,73 @@ class BookSnapshot:
 
 
 @dataclass(frozen=True)
+class MarketMeta:
+    """Cached token metadata (FR-M-1) needed by selectors. `decide()` (§6) must stay
+    pure — it can't fetch this itself — so it's passed in as data, resolved by the
+    caller from `market/cache.py` before calling `decide()`.
+    """
+
+    token_id: str
+    category: str | None  # None = unknown/uncached (FR-M-3: scoped bots must skip, never guess)
+    tick_size: Decimal
+    min_order_size: Decimal
+    neg_risk: bool
+    tradeable: bool
+    event_id: str | None
+    resolution_days_out: int | None  # days from `now` to resolution; None if unknown
+
+
+@dataclass(frozen=True)
+class TargetPolicyStats:
+    """The slice of `target_stats` (§5) `decide()` needs: the size distribution for
+    FR-P-3's percentile sizing, plus status (FR-T-2..4) and the caller-computed
+    position estimate FR-P-11's exit-proportionality needs.
+
+    `position_before`: the target's own share count in `fill.token_id` immediately
+    before this fill — not a `target_stats` column (that table holds aggregate stats,
+    not per-token position). §5 doesn't model per-token target position anywhere, so
+    this is a deliberate extension: the caller (ledger/replay) derives it by replaying
+    that target's own fill history for this token before calling `decide()`. Without
+    it, FR-P-11 ("sell X% of yours when they sell X% of theirs") isn't computable at
+    all from the given schema.
+    """
+
+    size_p50: Decimal
+    size_p60: Decimal
+    size_p80: Decimal
+    size_p95: Decimal
+    status: Literal["shadow", "active", "paused_decay", "paused_dormant", "paused_manual"]
+    position_before: Decimal
+
+
+@dataclass(frozen=True)
+class Position:
+    token_id: str
+    shares: Decimal
+    cost_basis_usd: Decimal
+
+
+@dataclass(frozen=True)
+class LedgerState:
+    """Everything `decide()` needs to know about capital state (FR-P-5, FR-P-11).
+    Computed by the caller from the `positions` table (+ a cross-bot read for the
+    global cap, per design doc §2.2: "no individual bot can enforce
+    global_max_exposure_usd — it must be a read against the shared positions table").
+    """
+
+    positions: tuple[Position, ...]  # this bot's own open positions
+    deployed_usd: Decimal  # this bot's capital currently committed (sum of open cost basis)
+    global_exposure_usd: Decimal  # across ALL bots, for the shared cap
+    halted: bool  # FR-L-5: reconciler halts the bot on drift; decide() must respect it
+
+    def position_for(self, token_id: str) -> Position | None:
+        for p in self.positions:
+            if p.token_id == token_id:
+                return p
+        return None
+
+
+@dataclass(frozen=True)
 class Intent:
     bot_id: str
     fill: TargetFill
@@ -116,5 +183,10 @@ SKIP_REASONS = frozenset(
         "target_paused",
         "netted_out",
         "bot_halted",
+        # Extended beyond the PRD §6 list (which explicitly permits extending, never
+        # renaming): a target SELL with nothing on our side to mirror doesn't fit any
+        # of the above — it's not a capital/guard/selector rejection, there's simply
+        # no position to scale FR-P-11's exit fraction against.
+        "no_position_to_exit",
     }
 )
