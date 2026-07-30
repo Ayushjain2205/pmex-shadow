@@ -162,6 +162,11 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
     }
 
 
+async def list_bot_ids(conn: asyncpg.Connection) -> list[str]:
+    rows = await conn.fetch("SELECT bot_id FROM bot_config WHERE active ORDER BY bot_id")
+    return [r["bot_id"] for r in rows]
+
+
 async def targets_view(conn: asyncpg.Connection) -> list[dict]:
     return await conn.fetch(
         "SELECT target, alias, status, size_p50, size_p80, size_p95, fills_30d, "

@@ -1,7 +1,9 @@
 .env
+docker-compose.override.yml
 secrets/*.env
 bots/*.yaml
 !bots/*.yaml.example
+docker-compose.bots.yml
 __pycache__/
 *.pyc
 .pytest_cache/

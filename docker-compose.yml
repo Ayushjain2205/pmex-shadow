@@ -30,6 +30,10 @@ services:
       db:
         condition: service_healthy
     env_file: .env
+    volumes:
+      - ./bots:/app/bots
+      - ./secrets:/app/secrets
+      - ./policy.yaml:/app/policy.yaml
     command: ["watcher"]
     restart: unless-stopped
 
@@ -40,7 +44,7 @@ services:
         condition: service_healthy
     env_file: .env
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${PMEX_CONTROL_HOST_PORT:-8877}:8080"
     command: ["control", "--host", "0.0.0.0", "--port", "8080"]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=3)"]

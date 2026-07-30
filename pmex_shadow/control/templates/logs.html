@@ -10,7 +10,7 @@
   <tbody>
     {% for l in logs %}
     <tr>
-      <td>{{ l.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+      <td><span data-utc="{{ l.at.isoformat() }}">{{ l.at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</span></td>
       <td>{{ l.bot_id or "—" }}</td>
       <td><span class="pill pill-{{ l.level }}">{{ l.level }}</span></td>
       <td>{{ l.component }}</td>

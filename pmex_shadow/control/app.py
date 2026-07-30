@@ -87,10 +87,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "bot_detail.html", _ctx(request, bot_id=bot_id, active_nav="fleet", **detail))
 
     @app.get("/targets")
-    async def targets(request: Request):
+    async def targets(request: Request, message: str | None = None, error: str | None = None):
         async with app.state.pool.acquire() as conn:
             rows = await queries.targets_view(conn)
-        return templates.TemplateResponse(request, "targets.html", _ctx(request, targets=rows, active_nav="targets"))
+            bot_ids = await queries.list_bot_ids(conn)
+        return templates.TemplateResponse(
+            request, "targets.html",
+            _ctx(request, targets=rows, bot_ids=bot_ids, active_nav="targets", message=message, error=error),
+        )
+
+    @app.post("/targets")
+    async def targets_add(
+        request: Request,
+        address: str = Form(...), alias: str = Form(""),
+        bot_id: str = Form(""),
+    ):
+        from urllib.parse import quote
+
+        from pmex_shadow.targets.registry import InvalidAddress, register_target
+
+        alias = alias.strip() or None
+        bot_id = bot_id.strip() or None
+
+        async with app.state.pool.acquire() as conn:
+            try:
+                is_new = await register_target(conn, address, alias)
+            except InvalidAddress as exc:
+                return RedirectResponse(f"/targets?error={quote(str(exc))}", status_code=303)
+
+            verb = "now tracking" if is_new else "alias updated for"
+            message = f"{verb} {address.strip().lower()}"
+
+            if bot_id:
+                current = await config_write.get_active_config(conn, bot_id)
+                if current is None:
+                    return RedirectResponse(f"/targets?message={quote(message)}&error={quote(f'bot {bot_id} not found — target was still registered')}", status_code=303)
+                ref = alias or address.strip().lower()
+                new_config = dict(current["config"])
+                existing_targets = list(new_config.get("targets", []))
+                if ref not in existing_targets:
+                    new_config["targets"] = existing_targets + [ref]
+                    applied, reason = await config_write.propose_config_update(conn, bot_id, actor="control-ui", new_config_dict=new_config)
+                    if applied:
+                        message += f", attached to {bot_id} (v{current['version'] + 1})"
+                    else:
+                        return RedirectResponse(f"/targets?message={quote(message)}&error={quote(f'could not attach to {bot_id}: {reason}')}", status_code=303)
+                else:
+                    message += f", already in {bot_id}'s target list"
+
+        return RedirectResponse(f"/targets?message={quote(message)}", status_code=303)
 
     @app.get("/logs")
     async def logs(request: Request, bot_id: str | None = None):
@@ -117,6 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def params_submit(
         request: Request, bot_id: str,
         mode: str = Form(...), policy_profile: str = Form(...), envelope_usd: str = Form(...), categories: str = Form(""),
+        targets: str = Form(""),
     ):
         async with app.state.pool.acquire() as conn:
             current = await config_write.get_active_config(conn, bot_id)
@@ -128,6 +174,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             new_config["risk"] = {"envelope_usd": envelope_usd}
             cats = [c.strip() for c in categories.split(",") if c.strip()]
             new_config["selectors"] = {**current["config"].get("selectors", {}), "categories": cats or None}
+            new_config["targets"] = [t.strip() for t in targets.split(",") if t.strip()]
 
             applied, message = await config_write.propose_config_update(conn, bot_id, actor="control-ui", new_config_dict=new_config)
         return RedirectResponse(f"/bots/{bot_id}/params?applied={str(applied).lower()}&message={message}", status_code=303)

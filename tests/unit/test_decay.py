@@ -48,11 +48,6 @@ def test_already_paused_targets_are_never_touched():
         assert check_decay(inp) is None
 
 
-def test_shadow_targets_are_eligible_for_decay_checks_too():
-    inp = _base(status="shadow", hit_rate_30d=Decimal("0.10"), fills_30d=50)
-    assert check_decay(inp) == "paused_decay"
-
-
 def test_no_fill_history_does_not_crash_or_falsely_flag_dormancy():
     inp = _base(last_fill_at=None)
     assert check_decay(inp) is None

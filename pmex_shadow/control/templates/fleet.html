@@ -18,8 +18,8 @@
       <td>${{ "%.2f"|format(b.deployed_usd) }}</td>
       <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#16a34a' if b.today_pnl_usd > 0 else '#dc2626') }}">${{ "%.2f"|format(b.today_pnl_usd) }}</td>
       <td>{{ "%.0f%%"|format(b.skip_rate_24h * 100) if b.skip_rate_24h is not none else "—" }}</td>
-      <td>{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") if b.last_fill_at else "never" }}</td>
-      <td>{{ b.heartbeat_at.strftime("%H:%M:%S") if b.heartbeat_at else "—" }}</td>
+      <td>{% if b.last_fill_at %}<span data-utc="{{ b.last_fill_at.isoformat() }}">{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
+      <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="time">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
       <td><a href="/bots/{{ b.bot_id }}">view →</a></td>
     </tr>
     {% endfor %}

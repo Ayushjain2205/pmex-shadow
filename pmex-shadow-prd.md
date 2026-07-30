@@ -424,7 +424,7 @@ This is what makes `replay` possible. Any impurity here breaks Phase 2 and is a 
 | FR-T-1 | Recompute `target_stats` (size percentiles, 30d PnL, hit rate, reversal rate) on a scheduled job. |
 | FR-T-2 | Auto-pause a target when `hit_rate_30d` falls below `min_hit_rate` and `fills_30d` exceeds a minimum sample size. Set `status = paused_decay` and raise a WARN event. |
 | FR-T-3 | Auto-pause on dormancy after `dormancy_days` without a fill. |
-| FR-T-4 | New targets default to `status = shadow`: full pipeline, intents recorded, orders suppressed, for `shadow_days`. |
+| FR-T-4 | *Removed 2026-07-31, repo owner's explicit request.* Previously: new targets defaulted to `status = shadow` (full pipeline, intents recorded, orders suppressed) for `shadow_days` before being trusted to trade for real. Now: new targets are `active` immediately — no observation window. The tradeoff being given up: the shadow gate existed specifically so a copier's *first* real fills for a not-yet-vetted wallet weren't a blind bet with real money — that protection no longer exists for newly added targets. The repo owner was told this plainly before the change was made. |
 | FR-T-5 | Compute `reversal_rate` — the fraction of a target's fills followed by an opposing fill on the same token within `reversal_window_s`. Surface it; do not auto-act on it. |
 | FR-T-6 | `pmex-shadow targets migrate <old> <new>` reassigns a target's history to a new proxy address. |
 
@@ -436,7 +436,7 @@ This is what makes `replay` possible. Any impurity here breaks Phase 2 and is a 
 | FR-C-2 | Screens: fleet view, bot detail, targets, params. Log view queries the `events` table. |
 | FR-C-3 | Config changes write a new `bot_config` version; bots poll their active version and hot-reload. |
 | FR-C-4 | Validate against schema and sanity bounds before activation. On rejection: keep the previous active version, write a `config_audit` row with `outcome = rejected`, raise a WARN. A bot is never left unconfigured. |
-| FR-C-5 | Fields not hot-reloadable (wallet, targets, DB settings) are marked in the schema and rendered disabled with "restart required". |
+| FR-C-5 | Fields not hot-reloadable (wallet, DB settings) are marked in the schema and rendered disabled with "restart required". *Amended 2026-07-30, repo owner's explicit request: originally also listed `targets`, grouped in under "identity" fields. Relaxed after confirming a bot's target set is just an in-process address filter recomputed from `target_stats` (execution/consumer.py) — nothing signing- or in-flight-order-related depends on it, unlike wallet, which is bound to a live signing client for the process lifetime. `targets` now hot-reloads like selectors/mode/policy.* |
 | FR-C-6 | Every change writes `config_audit` with actor, diff, and outcome. |
 | FR-C-7 | Binds to `127.0.0.1` by default. Refuses to start without `PMEX_CONTROL_AUTH_SECRET` set. No default credentials. |
 | FR-C-8 | Read-only unless `PMEX_CONTROL_ALLOW_WRITES=1`. Treasury endpoints do not exist in the web app at all. |
@@ -504,7 +504,7 @@ Skeleton, Dockerfile, compose, Alembic migrations for §5, config models, `init`
 ### Phase 5 — Targets (3d)
 - [ ] Percentile distribution computed from real captured fills
 - [ ] Decay auto-pause fires on synthetic declining performance
-- [ ] Shadow onboarding records intents with orders suppressed
+- [x] ~~Shadow onboarding records intents with orders suppressed~~ — removed (FR-T-4, 2026-07-31); new targets are active immediately
 - [ ] Dormancy and reversal-rate computed and surfaced
 
 ### Phase 6 — Control plane (5d)

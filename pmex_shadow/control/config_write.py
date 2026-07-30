@@ -3,7 +3,13 @@ rules, enforced here specifically:
   1. bots/*.yaml seeds the initial row; the DB is authoritative thereafter.
   2. Validate before apply; fail to last-good — a rejected config never leaves a bot
      unconfigured, and the previous active version stays active.
-  3. Not everything is hot-reloadable: wallet and targets require a restart.
+  3. Not everything is hot-reloadable: wallet requires a restart. `targets` used to
+     be grouped in with wallet/name under FR-C-5 as "identity" fields, but unlike
+     wallet (bound to a live signing client for the process lifetime — cli.py's
+     ClobClient/ExecutionRouter construction) a bot's target set is just an
+     in-process address filter (execution/consumer.py's `_target_addresses`)
+     recomputed from target_stats — no in-flight order or signing state depends on
+     it, so it hot-reloads like selectors/mode/policy do.
   4. Every change is audited: actor, diff, outcome.
 """
 
@@ -16,8 +22,8 @@ from pydantic import ValidationError
 
 from pmex_shadow.config import BotConfig
 
-# FR-C-5: fields that change the bot's identity or funding — never hot-reloadable.
-NON_HOT_RELOADABLE_FIELDS = frozenset({"name", "wallet", "targets"})
+# Fields that change the bot's identity or funding — never hot-reloadable.
+NON_HOT_RELOADABLE_FIELDS = frozenset({"name", "wallet"})
 
 
 async def get_active_config(conn: asyncpg.Connection, bot_id: str) -> dict | None:

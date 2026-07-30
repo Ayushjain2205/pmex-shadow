@@ -1,0 +1,45 @@
+# Conservative defaults — someone will clone this and run it without reading further.
+profiles:
+  tight:
+    max_slippage_ticks: 1
+    volatility_guard: { window_s: 5, max_ticks: 2 }
+    max_fill_age_s: 5
+    sizing:
+      mode: target_size_percentile
+      base_unit_usd: "10"
+      curve: [{ p: 50, mult: "1.0" }, { p: 80, mult: "1.5" }, { p: 95, mult: "2.5" }]
+      min_target_size_percentile: "60"
+      min_order_usd: "5"
+      max_position_usd: "50"
+      max_concurrent_positions: 8
+      reserve_pct: "20"
+  loose:
+    max_slippage_ticks: 4
+    volatility_guard: { window_s: 30, max_ticks: 8 }
+    max_fill_age_s: 30
+    sizing:
+      mode: target_size_percentile
+      base_unit_usd: "10"
+      curve: [{ p: 50, mult: "1.0" }, { p: 80, mult: "1.5" }, { p: 95, mult: "2.5" }]
+      min_target_size_percentile: "60"
+      min_order_usd: "5"
+      max_position_usd: "75"
+      max_concurrent_positions: 8
+      reserve_pct: "20"
+
+risk:
+  global_max_exposure_usd: "5000"
+  max_orders_per_minute: 30
+  halt_on_reconcile_drift_usd: "100"
+
+targets:
+  decay:
+    window_days: 30
+    min_hit_rate: "0.45"
+    auto_pause: true
+  dormancy_days: 21
+
+exits:
+  mirror_sells: true
+  auto_redeem: true
+  redeem_retry_days: 30

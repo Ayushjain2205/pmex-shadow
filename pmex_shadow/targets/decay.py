@@ -28,7 +28,7 @@ def check_decay(inp: DecayCheckInput) -> str | None:
     """Returns the new status if a pause is warranted, else None (no change).
     Never un-pauses — that's an operator action (`targets resume`), not automatic.
     """
-    if inp.status not in ("shadow", "active"):
+    if inp.status != "active":
         return None  # already paused (any reason) or otherwise not eligible
 
     if inp.last_fill_at is not None:

@@ -94,7 +94,7 @@ class MarketMeta:
 @dataclass(frozen=True)
 class TargetPolicyStats:
     """The slice of `target_stats` (§5) `decide()` needs: the size distribution for
-    FR-P-3's percentile sizing, plus status (FR-T-2..4) and the caller-computed
+    FR-P-3's percentile sizing, plus status (FR-T-2, FR-T-3) and the caller-computed
     position estimate FR-P-11's exit-proportionality needs.
 
     `position_before`: the target's own share count in `fill.token_id` immediately
@@ -110,7 +110,7 @@ class TargetPolicyStats:
     size_p60: Decimal
     size_p80: Decimal
     size_p95: Decimal
-    status: Literal["shadow", "active", "paused_decay", "paused_dormant", "paused_manual"]
+    status: Literal["active", "paused_decay", "paused_dormant", "paused_manual"]
     position_before: Decimal
 
 

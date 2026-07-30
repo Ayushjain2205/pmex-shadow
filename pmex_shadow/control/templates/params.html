@@ -3,7 +3,7 @@
 {% block content %}
 <p><a href="/bots/{{ bot_id }}">← {{ bot_id }}</a></p>
 <h1>{{ bot_id }} — Parameters</h1>
-<p style="opacity:0.7">Version {{ version }}. Fields marked <em>restart required</em> are not hot-reloadable (FR-C-5) and are disabled here — edit <code>bots/{{ bot_id }}.yaml</code> and restart the bot instead.</p>
+<p style="opacity:0.7">Version {{ version }}. Name and wallet are bound to this process's signing client at startup and can't be changed without a restart — edit <code>bots/{{ bot_id }}.yaml</code> for those. Everything else, including targets, hot-reloads into the running bot within ~10s.</p>
 
 {% if message %}
 <div class="banner {{ 'banner-success' if applied else 'banner-error' }}">{{ message }}</div>
@@ -16,8 +16,9 @@
   <label>Wallet <span style="opacity:0.5">(restart required)</span></label>
   <input type="text" value="funder_env: {{ config.wallet.funder_env }} / pk_env: {{ config.wallet.pk_env }}" disabled style="width: 100%;">
 
-  <label>Targets <span style="opacity:0.5">(restart required)</span></label>
-  <input type="text" value="{{ config.targets | join(', ') }}" disabled style="width: 100%;">
+  <label>Targets <span style="opacity:0.5">(comma-separated aliases or 0x addresses; takes effect within ~10s, no restart)</span></label>
+  <input type="text" name="targets" value="{{ config.targets | join(', ') }}" {{ "disabled" if not writes_enabled }} style="width: 100%;">
+  <div class="field-hint">An alias must already be registered via <a href="/targets">Targets</a> before a bot can watch it — an unresolved alias is dropped and logged as a warning, not an error.</div>
 
   <label>Mode</label>
   <select name="mode" {{ "disabled" if not writes_enabled }}>
@@ -53,7 +54,7 @@
     <tbody>
       {% for a in audit %}
       <tr>
-        <td>{{ a.at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+        <td><span data-utc="{{ a.at.isoformat() }}">{{ a.at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</span></td>
         <td>{{ a.actor }}</td>
         <td>{{ a.from_version if a.from_version is not none else "—" }}</td>
         <td>{{ a.to_version }}</td>

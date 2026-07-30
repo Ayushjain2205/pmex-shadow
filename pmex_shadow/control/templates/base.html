@@ -18,7 +18,7 @@
     th { opacity: 0.6; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; }
     .pill { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
     .pill-active, .pill-filled, .pill-applied, .pill-resolved, .pill-redeemed { background: color-mix(in srgb, #22c55e 25%, transparent); color: #16a34a; }
-    .pill-shadow, .pill-pending_resolution, .pill-built, .pill-submitted, .pill-acked { background: color-mix(in srgb, #eab308 25%, transparent); color: #a16207; }
+    .pill-pending_resolution, .pill-built, .pill-submitted, .pill-acked { background: color-mix(in srgb, #eab308 25%, transparent); color: #a16207; }
     .pill-paused_decay, .pill-paused_dormant, .pill-paused_manual, .pill-rejected, .pill-CRITICAL, .pill-rejected_order { background: color-mix(in srgb, #ef4444 25%, transparent); color: #dc2626; }
     .pill-WARN { background: color-mix(in srgb, #f97316 25%, transparent); color: #ea580c; }
     .pill-COPY { background: color-mix(in srgb, #3b82f6 25%, transparent); color: #2563eb; }
@@ -54,5 +54,19 @@
     {% endif %}
     {% block content %}{% endblock %}
   </main>
+  <script>
+    // Every timestamp on the page is rendered server-side in UTC (data-utc holds
+    // the ISO string) and swapped to the viewer's local timezone here — the
+    // server has no reliable way to know that, only the browser does.
+    document.querySelectorAll("[data-utc]").forEach((el) => {
+      const d = new Date(el.getAttribute("data-utc"));
+      if (isNaN(d)) return;
+      const opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false };
+      if (el.getAttribute("data-mode") !== "time") {
+        Object.assign(opts, { year: "numeric", month: "2-digit", day: "2-digit" });
+      }
+      el.textContent = d.toLocaleString(undefined, opts);
+    });
+  </script>
 </body>
 </html>

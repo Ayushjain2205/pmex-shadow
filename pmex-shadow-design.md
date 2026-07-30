@@ -301,7 +301,7 @@ The layer that keeps this working without you watching it.
 
 - **Alpha decay monitor** — rolling 30-day PnL, hit rate, and average slippage-adjusted edge per target. Auto-pause on threshold breach. Targets stop working: they get copied to death, change strategy, or were variance all along. Without this you find out during a drawdown; with it, the system cuts its own losers.
 - **Lifecycle** — dormancy detection ("whale1 hasn't traded in 21 days"), and proxy-wallet migration when a target moves address.
-- **Onboarding** — a new target runs in shadow inside a *live* bot for a configurable period before it's permitted to trade. Same pipeline, orders suppressed.
+- ~~**Onboarding** — a new target runs in shadow inside a *live* bot for a configurable period before it's permitted to trade. Same pipeline, orders suppressed.~~ Removed 2026-07-31 at the repo owner's explicit request — new targets are active immediately. The gate existed so a not-yet-vetted wallet's first real fills weren't a blind bet with real money; that protection is gone for newly added targets now.
 - **Adversarial detection** — Polymarket's leaderboards are public and your targets know copiers exist. A whale can buy, let copiers lift the book behind them, and sell into the flow they created. Flag any target whose fills are frequently followed by their own reversal within a short window. If a target's "alpha" is largely you, the correlation shows up fast.
 
 ### 3.7 `research/`
@@ -330,7 +330,7 @@ Scraping PnL into Prometheus gives you a *sampled approximation of your money*. 
 
 1. **Config lives in a versioned Postgres table, not edited YAML.** `bots/*.yaml` seeds the initial row; the DB is authoritative thereafter. Bots watch their version and hot-reload.
 2. **Validate before apply; fail to last-good.** Schema plus sanity bounds — slippage over ~10 ticks, envelope exceeding available collateral, sizing above per-market cap. A rejected config leaves the bot on its previous version and raises an alert; it never leaves a bot unconfigured.
-3. **Not everything is hot-reloadable.** Guards, sizing and selectors: yes. Wallet, target set, DB settings: restart. Mark the boundary in the schema so the UI greys them out rather than silently ignoring an edit.
+3. **Not everything is hot-reloadable.** Guards, sizing, selectors, and (as of 2026-07-30) the target set: yes. Wallet, DB settings: restart. Mark the boundary in the schema so the UI greys them out rather than silently ignoring an edit. Target set was originally grouped in with wallet as a restart-required "identity" field, but it doesn't actually carry the same constraint: a bot's target list is just an in-process address filter recomputed from `target_stats`, with no live signing client or in-flight order state riding on it the way wallet has. Relaxed at the repo owner's explicit request once that distinction was confirmed against the code.
 4. **Every change is audited** — actor, timestamp, old → new, resulting version. When a bot's behaviour changes at 3am you need to know whether a human moved a number.
 
 ### 3.9 `ops/`

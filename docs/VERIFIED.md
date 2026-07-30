@@ -386,3 +386,29 @@ Both findings confirmed empirically end-to-end in Docker: a live target
 correctly-sided `target_fills` rows from **both** the chain subscription (source=chain,
 real block numbers) and the Data API sweep (source=dataapi) independently, with no
 duplicate rows — see the Phase 1 commit for the captured evidence.
+
+## Addendum: `bot new --import` wallet-import path (2026-07-31)
+
+**14. `AsyncSecureClient.create()` handles an already-registered key transparently —
+falls back from create to derive, not a hard failure.** `ops/wallets.py`'s
+`provision_bot_wallet()` gained an `--import`/`--private-key-env` path (`bot new`) to
+let a bot use an existing wallet instead of always generating a fresh empty one.
+The open question going in: what happens when the imported key *already* has
+Polymarket CLOB API credentials registered — does the SDK error, or handle it?
+
+Tested directly: ran `bot new` twice against the same imported test key.
+- **First run** (key has no prior credentials): `POST /auth/api-key` → `200 OK`,
+  fresh credentials issued.
+- **Second run, same key** (now already has credentials from the first run):
+  `POST /auth/api-key` → `400 Bad Request`, followed automatically by
+  `GET /auth/derive-api-key` → `200 OK` — the SDK retried on the derive-existing
+  endpoint itself, with no code change needed on this repo's side, and returned
+  working credentials both times.
+
+So importing a wallet that already has Polymarket history/credentials is safe as
+implemented — confirmed against the actual create-vs-derive branch, not assumed.
+**Not yet tested**: a real *funded*, actively-traded external wallet (only a
+freshly-generated throwaway key was available to test with) — the credential
+derivation path is confirmed, but nothing about balance/allowance detection on an
+already-funded address was exercised here. Run `doctor --bot <name>` after any real
+import before trusting it, same as the code's own guidance.

@@ -94,8 +94,10 @@ docker compose exec db psql -U postgres -d pmex -c "SELECT * FROM target_fills O
 **Ship with an empty target list on purpose** — this repo includes no default
 targets. Curated addresses in a public repo turn into a herd all copying the same
 wallet, which degrades the edge for everyone including you (design doc §11). New
-targets start in `shadow` status (full pipeline runs, orders suppressed) for 14
-days by default — see `--shadow-days`.
+targets are `active` immediately — no observation window. *(Earlier versions of
+this repo ran every new target through a 14-day `shadow` probation — full pipeline,
+orders suppressed — before trusting it with real orders. Removed 2026-07-31 at the
+repo owner's explicit request; see PRD FR-T-4 for the tradeoff this gives up.)*
 
 ### Create a bot and run it in paper mode
 
@@ -116,13 +118,14 @@ Positions, PnL, and the dashboard are all real, just not backed by real money.
 
 ```bash
 docker compose exec watcher pmex-shadow bot resume sports_bot1   # only if you've halted it
-open http://127.0.0.1:8080/   # or wherever you've bound the control plane
+open http://127.0.0.1:8877/   # PMEX_CONTROL_HOST_PORT in .env, or wherever you've bound it
 ```
 
 Fleet view, per-bot detail (positions, decisions, skip reasons, log tail), targets
-scorecard, and a params screen for hot-reloadable settings (mode, policy profile,
-envelope, category selectors — wallet and targets require a restart, disabled in the
-UI). Every change is versioned and audited (`config_audit`).
+scorecard (with an add-target-wallet form), and a params screen for hot-reloadable
+settings (mode, policy profile, envelope, category selectors, target list — only
+wallet requires a restart, disabled in the UI). Every change is versioned and
+audited (`config_audit`).
 
 ### Going live (do not skip this section)
 
@@ -170,14 +173,17 @@ sports, Data-API-only is genuinely viable, and the system is fully functional wi
 pmex-shadow init                    scaffold policy.yaml, bots/, secrets/
 pmex-shadow doctor [--bot NAME]     preflight checks — run this first, always
 
-pmex-shadow bot new <name>          generate wallet + CLOB creds, scaffold bots/<name>.yaml
+pmex-shadow bot new <name> [--import | --private-key-env VAR]
+                                     generate wallet + CLOB creds, scaffold bots/<name>.yaml
+                                     (--import prompts for an existing key instead of
+                                     generating one — may already hold real funds, confirms first)
 pmex-shadow bot run <name> [--live] consume fills, decide, execute (paper or, deliberately, live)
 pmex-shadow bot resume <name>       clear a halt (reconcile drift or killswitch) — always explicit
 pmex-shadow bot overlap             report bots sharing targets + selectors, combined exposure
 
-pmex-shadow targets add <addr> [--alias NAME] [--shadow-days N]
+pmex-shadow targets add <addr> [--alias NAME]
 pmex-shadow targets list|pause|resume|migrate
-pmex-shadow targets recompute [--schedule CRON]   stats, decay/dormancy, shadow graduation
+pmex-shadow targets recompute [--schedule CRON]   stats, decay/dormancy auto-pause
 
 pmex-shadow watcher                 shared fill stream: heartbeat + chain + sweep + paper logger
 pmex-shadow control [--host] [--port]
@@ -188,6 +194,20 @@ pmex-shadow export --kind fills|pnl [--since <date>] [--output FILE]
 pmex-shadow panic [--bot NAME] [--flatten]   halt every bot, or one; --flatten cancels
                                               resting orders only, never auto-liquidates positions
 pmex-shadow compose generate        bots/*.yaml -> docker-compose.bots.yml
+```
+
+`compose generate` and `doctor`/`init` run against your local checkout — install the
+package locally (`pip install -e .`, or just `pip install .`) and run them from the
+repo root, the same way you'd run `docker compose` itself. Don't run `compose
+generate` via `docker compose exec watcher ...`: the file it writes only means
+anything to the **host's** `docker compose` CLI, and a container has no way to write
+back to the host filesystem outside its own mounted volumes (and no docker socket is
+mounted here, on purpose — a container can't reach back and control its own
+orchestrator). Bring a bot up with the file it produces:
+
+```bash
+pmex-shadow compose generate
+docker compose -f docker-compose.yml -f docker-compose.bots.yml up -d bot-<name>
 ```
 
 ---

@@ -21,7 +21,7 @@ def generate_compose(bots: list[BotConfig]) -> str:
             "build": ".",
             "depends_on": ["watcher"],
             "env_file": [".env", f"secrets/{bot.name}.env"],
-            "volumes": [f"./bots/{bot.name}.yaml:/app/bots/{bot.name}.yaml:ro"],
+            "volumes": [f"./bots/{bot.name}.yaml:/app/bots/{bot.name}.yaml:ro", "./policy.yaml:/app/policy.yaml:ro"],
             "command": ["bot", "run", bot.name],
             "stop_grace_period": "30s",  # must exceed the cancel-all path's worst case (FR-EXE-6)
             "restart": "unless-stopped",

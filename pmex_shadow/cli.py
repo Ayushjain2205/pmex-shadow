@@ -70,9 +70,19 @@ app.add_typer(bot_app, name="bot")
 def bot_new(
     name: str,
     template: str = typer.Option("default", "--template"),
+    import_key: bool = typer.Option(False, "--import", help="use an existing wallet instead of generating one — prompts for the private key, hidden"),
+    private_key_env: str | None = typer.Option(None, "--private-key-env", help="read the existing private key from this already-set env var instead of prompting (for scripted use)"),
 ) -> None:
-    """Scaffold bots/<name>.yaml, derive a wallet + CLOB creds, print the funding address."""
+    """Scaffold bots/<name>.yaml, derive a wallet + CLOB creds, print the funding address.
+
+    By default generates a fresh, empty EOA (zero risk — nothing to lose, nothing
+    funded). --import or --private-key-env instead use a wallet you already have,
+    which may already hold real funds — see the confirmation prompt below."""
     from pmex_shadow.ops.wallets import provision_bot_wallet
+
+    if import_key and private_key_env:
+        typer.secho("--import and --private-key-env are mutually exclusive — pick one", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
     BOTS_DIR.mkdir(exist_ok=True)
     SECRETS_DIR.mkdir(exist_ok=True)
@@ -83,9 +93,31 @@ def bot_new(
         typer.secho(f"{bot_yaml_path} already exists — refusing to overwrite", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
+    imported_key: str | None = None
+    if private_key_env:
+        imported_key = os.environ.get(private_key_env)
+        if not imported_key:
+            typer.secho(f"${private_key_env} is not set or empty", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+    elif import_key:
+        imported_key = typer.prompt("Private key to import (hex, 0x-prefixed or not)", hide_input=True)
+
+    if imported_key:
+        from eth_account import Account
+
+        try:
+            address = Account.from_key(imported_key).address
+        except Exception as exc:
+            typer.secho(f"not a valid private key: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+        typer.secho(f"Importing wallet {address} — this may already hold real funds.", fg=typer.colors.YELLOW, bold=True)
+        if not typer.confirm(f"Store this private key in {SECRETS_DIR / f'{name}.env'} on this machine and use it for '{name}'?"):
+            typer.echo("aborted")
+            raise typer.Exit(code=1)
+
     typer.echo(f"Deriving wallet and CLOB credentials for '{name}' (live network call)...")
     try:
-        wallet = asyncio.run(provision_bot_wallet())
+        wallet = asyncio.run(provision_bot_wallet(private_key=imported_key))
     except Exception as exc:
         typer.secho(f"credential derivation failed: {exc}", fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
@@ -128,7 +160,11 @@ def bot_new(
     typer.secho(f"wrote {bot_yaml_path}", fg=typer.colors.GREEN)
     typer.secho(f"wrote {secret_path} (mode 0600)", fg=typer.colors.GREEN)
     typer.secho(f"wallet type: {wallet.wallet_type}", fg=typer.colors.GREEN)
-    typer.secho(f"FUND THIS ADDRESS: {wallet.funding_address}", fg=typer.colors.CYAN, bold=True)
+    if imported_key:
+        typer.secho(f"imported wallet: {wallet.funding_address}", fg=typer.colors.CYAN, bold=True)
+        typer.echo("Run `pmex-shadow doctor --bot <name>` to confirm balances/allowances on this address before running live.")
+    else:
+        typer.secho(f"FUND THIS ADDRESS: {wallet.funding_address}", fg=typer.colors.CYAN, bold=True)
     typer.echo("Edit bots/<name>.yaml to set targets/selectors, then `pmex-shadow doctor --bot <name>`.")
 
 
@@ -332,40 +368,29 @@ app.add_typer(targets_app, name="targets")
 def targets_add(
     address: str,
     alias: str | None = typer.Option(None, "--alias"),
-    shadow_days: int = typer.Option(14, "--shadow-days", help="days in shadow status before eligible to trade (FR-T-4)"),
 ) -> None:
     """Register a target wallet address for the watcher to track (target_stats).
-    New targets always start in `shadow` — full pipeline, orders suppressed — never
-    live from the first fill (FR-T-4)."""
+    Active immediately — no probation period."""
     import asyncpg
+
+    from pmex_shadow.targets.registry import InvalidAddress, register_target
 
     settings = Settings()
 
     async def _add() -> None:
         conn = await asyncpg.connect(settings.database_url)
         try:
-            addr = address.lower()
-            row = await conn.fetchrow("SELECT status FROM target_stats WHERE target = $1", addr)
-            await conn.execute(
-                """
-                INSERT INTO target_stats (target, alias, status)
-                VALUES ($1, $2, 'shadow')
-                ON CONFLICT (target) DO UPDATE SET alias = COALESCE(EXCLUDED.alias, target_stats.alias)
-                """,
-                addr, alias,
-            )
-            if row is None:  # only log a fresh shadow-start event for genuinely new targets
-                await conn.execute(
-                    "INSERT INTO events (level, component, message, context) VALUES ('INFO', 'targets.onboarding', 'target added, entering shadow', $1)",
-                    f'{{"target": "{addr}", "shadow_days": {shadow_days}}}',
-                )
+            return await register_target(conn, address, alias)
         finally:
             await conn.close()
 
-    asyncio.run(_add())
+    try:
+        asyncio.run(_add())
+    except InvalidAddress as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
     typer.secho(f"tracking {address.lower()}" + (f" (alias: {alias})" if alias else ""), fg=typer.colors.GREEN)
-    typer.echo(f"status: shadow for {shadow_days} days (orders suppressed, full pipeline runs)")
-    typer.echo("Restart the watcher (or wait for its next reconnect/sweep cycle) to pick it up.")
+    typer.echo("status: active. The watcher picks it up automatically (Data API sweep within one poll cycle; chain/WS path on its next reconnect).")
 
 
 @targets_app.command("list")
@@ -490,12 +515,11 @@ def targets_recompute(
     schedule: str | None = typer.Option(None, "--schedule", help="cron expression; omit to run once"),
 ) -> None:
     """Recompute target_stats (FR-T-1) and apply decay/dormancy auto-pause (FR-T-2,
-    FR-T-3) and shadow-onboarding graduation (FR-T-4)."""
+    FR-T-3)."""
     import asyncpg
 
     from pmex_shadow.config import load_policy_file
     from pmex_shadow.targets.decay import DecayCheckInput, check_decay
-    from pmex_shadow.targets.onboarding import check_onboarding
     from pmex_shadow.targets.stats import recompute_all_targets
 
     settings = Settings()
@@ -519,26 +543,6 @@ def targets_recompute(
                     await conn.execute(
                         "INSERT INTO events (level, component, message, context) VALUES ('WARN', 'targets.decay', 'auto-paused', $1)",
                         f'{{"target": "{row["target"]}", "new_status": "{new_status}"}}',
-                    )
-                    continue
-
-                onboarding_event = await conn.fetchrow(
-                    "SELECT context FROM events WHERE component = 'targets.onboarding' AND context->>'target' = $1 ORDER BY at ASC LIMIT 1",
-                    row["target"],
-                )
-                if onboarding_event:
-                    import json as _json
-
-                    ctx = onboarding_event["context"] if isinstance(onboarding_event["context"], dict) else _json.loads(onboarding_event["context"])
-                    shadow_days = ctx.get("shadow_days", 14)
-                else:
-                    shadow_days = 14
-                graduated = await check_onboarding(conn, row["target"], shadow_days, now)
-                if graduated:
-                    await conn.execute("UPDATE target_stats SET status = $2 WHERE target = $1", row["target"], graduated)
-                    await conn.execute(
-                        "INSERT INTO events (level, component, message) VALUES ($1, 'targets.onboarding', 'graduated from shadow to active')",
-                        row["target"],
                     )
             return n
         finally:

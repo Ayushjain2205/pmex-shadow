@@ -1,11 +1,20 @@
 """`bot new` wallet provisioning (design doc §2.2).
 
-Generates a fresh EOA and delegates *everything* about how Polymarket derives the
-funding/trading wallet and CLOB API credentials to the official `polymarket-client` SDK
-(`AsyncSecureClient.create`) rather than re-deriving proxy/deposit-wallet addresses by
-hand — the SDK is far more likely to track production wallet architecture (see
-docs/VERIFIED.md item 4 on the deposit-wallet vs legacy-proxy split) than anything
-reimplemented here.
+Generates a fresh EOA (or, for an imported key, wraps an existing one) and delegates
+*everything* about how Polymarket derives the funding/trading wallet and CLOB API
+credentials to the official `polymarket-client` SDK (`AsyncSecureClient.create`)
+rather than re-deriving proxy/deposit-wallet addresses by hand — the SDK is far more
+likely to track production wallet architecture (see docs/VERIFIED.md item 4 on the
+deposit-wallet vs legacy-proxy split) than anything reimplemented here.
+
+Import path (`private_key=...`): confirmed live that re-importing an already-
+registered key is safe — `AsyncSecureClient.create()` gets a 400 from
+`POST /auth/api-key` on a key that already has credentials and falls back to
+`GET /auth/derive-api-key` itself, no special-casing needed here (docs/VERIFIED.md
+item 14). Not exercised against a real *funded*, actively-traded external wallet
+(only a throwaway generated key was available to test the create-vs-derive branch
+with) — balance/allowance state on an imported address is unverified; that's what
+`doctor --bot <name>` is for after any real import.
 """
 
 from __future__ import annotations
@@ -27,14 +36,19 @@ class ProvisionedWallet:
     api_passphrase: str
 
 
-async def provision_bot_wallet() -> ProvisionedWallet:
-    """Generate a new EOA, derive its funding wallet + CLOB API creds live.
+async def provision_bot_wallet(private_key: str | None = None) -> ProvisionedWallet:
+    """Derive a funding wallet + CLOB API creds live, either for a freshly generated
+    EOA (private_key=None) or an imported one (private_key=<hex>).
 
     This makes a real network call to Polymarket's infrastructure to derive API
-    credentials for the freshly generated (unfunded, zero-risk) key. No funds move.
+    credentials for the key. For a freshly generated key this is zero-risk (nothing
+    to lose, nothing funded); for an imported key, this is exactly the point where an
+    existing, possibly-funded wallet's private key is handed to this process and
+    written to disk by the caller — that's the caller's decision to make explicitly,
+    not something to gate here.
     """
     Account.enable_unaudited_hdwallet_features()
-    acct = Account.create()
+    acct = Account.from_key(private_key) if private_key else Account.create()
 
     # Trade directly as the EOA (wallet=signer address) rather than the default
     # smart-contract Deposit Wallet flow — deploying a Deposit Wallet gaslessly
