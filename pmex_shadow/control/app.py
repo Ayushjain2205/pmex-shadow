@@ -83,7 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/bots/{bot_id}")
     async def bot_detail(request: Request, bot_id: str):
         async with app.state.pool.acquire() as conn:
-            detail = await queries.bot_detail(conn, bot_id)
+            detail = await queries.bot_detail(conn, bot_id, settings.gamma_api_base_url)
         return templates.TemplateResponse(request, "bot_detail.html", _ctx(request, bot_id=bot_id, active_nav="fleet", **detail))
 
     @app.get("/targets")

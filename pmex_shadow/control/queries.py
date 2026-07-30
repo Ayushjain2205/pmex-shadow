@@ -5,10 +5,12 @@ Prometheus. This module is the only place the control app touches the database.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 
 import asyncpg
+import httpx
 
 
 def _jsonb(value):
@@ -70,19 +72,63 @@ async def fleet_view(conn: asyncpg.Connection) -> list[dict]:
     return rows
 
 
-async def bot_detail(conn: asyncpg.Connection, bot_id: str) -> dict:
-    positions = await conn.fetch(
+async def _fetch_market_question(client: httpx.AsyncClient, gamma_api_base_url: str, token_id: str) -> str | None:
+    """Two real, mutually exclusive states to check, not one: querying
+    `clob_token_ids=<id>` with no `closed` param returns only *open* markets, and
+    `closed=true` returns *only* closed ones (confirmed live: an open market's token
+    queried with `closed=true` comes back empty, not "includes it anyway"). A
+    resolved-2-minutes-ago 5-minute crypto market genuinely needs the second call —
+    found by testing against a real position the first version of this function
+    still got wrong, not by reasoning about it in the abstract.
+    """
+    base = f"{gamma_api_base_url.rstrip('/')}/markets"
+    resp = await client.get(base, params={"clob_token_ids": token_id})
+    if resp.status_code == 200 and resp.json():
+        return resp.json()[0].get("question")
+    resp = await client.get(base, params={"clob_token_ids": token_id, "closed": "true"})
+    if resp.status_code == 200 and resp.json():
+        return resp.json()[0].get("question")
+    return None
+
+
+async def get_market_titles(gamma_api_base_url: str, token_ids: set[str]) -> dict[str, str]:
+    """token_id alone (a long numeric CLOB id) means nothing to a human looking at
+    the dashboard — this resolves it to the actual market question via Gamma.
+
+    One request per token per state, not a comma-separated batch: a batch looked
+    like it worked in an initial check (two of the *same* token, comma-joined,
+    returned two rows) but two genuinely *different* token ids in one call returns
+    `{"type": "validation error", "error": "invalid clob token ids"}` — confirmed
+    live, and only caught because the dashboard was actually showing the wrong thing
+    for a real position, not because the first test was thorough enough.
+    """
+    if not token_ids:
+        return {}
+    titles: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=10) as client:
+        results = await asyncio.gather(*(
+            _fetch_market_question(client, gamma_api_base_url, tid) for tid in token_ids
+        ), return_exceptions=True)
+    for tid, question in zip(token_ids, results):
+        if isinstance(question, Exception) or question is None:
+            continue
+        titles[tid] = question
+    return titles
+
+
+async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: str) -> dict:
+    positions = [dict(r) for r in await conn.fetch(
         "SELECT token_id, shares, cost_basis_usd, realized_pnl_usd, lifecycle FROM positions WHERE bot_id = $1 ORDER BY last_event_at DESC LIMIT 50",
         bot_id,
-    )
-    recent_intents = await conn.fetch(
+    )]
+    recent_intents = [dict(r) for r in await conn.fetch(
         """
         SELECT i.decision, i.skip_reason, i.token_id, i.side, i.target_price, i.intended_price,
                i.intended_shares, i.target_percentile, i.created_at
         FROM intents i WHERE i.bot_id = $1 ORDER BY i.created_at DESC LIMIT 50
         """,
         bot_id,
-    )
+    )]
     skips_by_reason = await conn.fetch(
         "SELECT skip_reason, count(*) AS n FROM intents WHERE bot_id = $1 AND decision = 'SKIP' "
         "AND created_at >= now() - interval '7 days' GROUP BY skip_reason ORDER BY n DESC",
@@ -99,6 +145,14 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str) -> dict:
         "SELECT level, component, message, context, at FROM events WHERE bot_id = $1 ORDER BY at DESC LIMIT 100",
         bot_id,
     )
+
+    token_ids = {p["token_id"] for p in positions} | {i["token_id"] for i in recent_intents}
+    titles = await get_market_titles(gamma_api_base_url, token_ids)
+    for p in positions:
+        p["market_title"] = titles.get(p["token_id"])
+    for i in recent_intents:
+        i["market_title"] = titles.get(i["token_id"])
+
     return {
         "positions": positions,
         "recent_intents": recent_intents,
