@@ -147,7 +147,36 @@ numbers yourself.
 
 The chain path (`POLYGON_WS_URL`) is **optional** — for politics and pre-game
 sports, Data-API-only is genuinely viable, and the system is fully functional with
-`PMEX_SOURCES_CHAIN_ENABLED=0`. If you do enable it:
+`PMEX_SOURCES_CHAIN_ENABLED=0`. The tradeoff: Data-API-only polls every
+`PMEX_DATAAPI_POLL_INTERVAL_S` (default 30s), so a fill can never be discovered
+sooner than that — a tight `max_fill_age_s` guard (the shipped default policy uses
+`5`) will skip every single fill as `stale_fill` on Data-API-only, unconditionally,
+not occasionally. If you want fills detected within a couple seconds of the actual
+on-chain event instead, enable the chain path:
+
+### Getting a free WSS + HTTPS endpoint (Alchemy)
+
+1. Go to [alchemy.com](https://alchemy.com) and sign up (free tier is enough here).
+2. Create a new App → Chain: **Polygon**, Network: **Polygon Mainnet**.
+3. Open the app → **"View Key"** → copy the **WebSocket (WSS)** URL:
+   ```
+   wss://polygon-mainnet.g.alchemy.com/v2/<your-api-key>
+   ```
+4. Same page has the **HTTPS** URL too — copy that as well:
+   ```
+   https://polygon-mainnet.g.alchemy.com/v2/<your-api-key>
+   ```
+5. In `.env`:
+   ```
+   POLYGON_WS_URL=wss://polygon-mainnet.g.alchemy.com/v2/<your-api-key>
+   POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/<your-api-key>
+   PMEX_SOURCES_CHAIN_ENABLED=1
+   ```
+6. `docker compose up -d watcher` to restart it with the chain path enabled.
+
+QuickNode, Chainstack, and dRPC all work the same way (create an app, grab the WSS +
+HTTPS URLs) if you'd rather use one of those — all four are confirmed viable, see
+below for why free public endpoints specifically are not.
 
 - **Free public WSS endpoints don't work for production.** Verified directly while
   building this: `wss://polygon-bor-rpc.publicnode.com`'s free tier subscribes fine
