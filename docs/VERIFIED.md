@@ -412,3 +412,45 @@ freshly-generated throwaway key was available to test with) — the credential
 derivation path is confirmed, but nothing about balance/allowance detection on an
 already-funded address was exercised here. Run `doctor --bot <name>` after any real
 import before trusting it, same as the code's own guidance.
+
+## Addendum: chain watcher gaps found running against real Polygon RPC (2026-07-31)
+
+Two separate, real bugs surfaced running `watcher/chain.py` against a live Alchemy
+endpoint with real target wallets and a bot actually consuming fills — not caught by
+anything short of running the actual pipeline end-to-end.
+
+**15. Alchemy's free tier caps `eth_getLogs` at a 10-block range — not the 50-block
+floor `backfill()`'s shrink-and-retry logic assumed.** A restart with a ~1000-block
+gap to backfill hit `eth_getLogs range rejected` on every chunk size the shrink loop
+tried, down to its floor of 50, then gave up, disconnected, and retried the identical
+range from scratch — looping forever, never actually backfilling anything. The
+Alchemy error body, fetched directly rather than inferred from the generic exception
+message:
+
+```json
+{"error":{"code":-32600,"message":"Under the Free tier plan, you can make
+eth_getLogs requests with up to a 10 block range. Based on your parameters, this
+block range should work: [0x56f0b95, 0x56f0b9e]. Upgrade to PAYG for expanded
+block range."}}
+```
+
+Lowered the shrink floor from 50 to 10 (`chain.py`'s `backfill()`) — confirmed live
+afterward: the same restart now shrinks down to 10-block chunks, every request
+returns `200`, and backfill completes in a couple seconds instead of looping. Worth
+re-checking if a different provider's actual floor turns out to be even lower — this
+was verified against Alchemy specifically, not assumed to generalize.
+
+**16. The live WS subscription's target filter is frozen at connect time — adding a
+new target while already connected is invisible to chain until the next
+disconnect/reconnect, which might not happen for hours.** `_subscribe_once()` reads
+the target list once, builds the `maker_topics` filter from that snapshot, and stays
+subscribed with it indefinitely; unlike the Data-API sweep loop (which re-reads the
+target list every poll), nothing was re-checking it. Confirmed directly: added a
+third target wallet while chain was already connected and watching two others — all
+109 of its fills over the next several minutes landed via `dataapi` only, zero via
+chain, despite the connection being healthy and correctly filtering the *other* two
+targets. Fixed with a concurrent `_watch_for_target_changes()` task that polls every
+15s and forces a clean resubscribe (closes the socket, `_subscribe_once` returns
+normally so the outer loop retries immediately with no backoff/WARN, since this
+isn't a failure) — confirmed the third target's fills started landing via chain
+after the reconnect it triggered.

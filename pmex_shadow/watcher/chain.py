@@ -96,7 +96,10 @@ async def backfill(
 ) -> None:
     """Chunked eth_getLogs over [from_block, to_block] inclusive (FR-W-4). Shrinks the
     chunk on an oversized-range error rather than trusting a fixed cap (docs/VERIFIED.md
-    item 11 — the real cap is provider-specific and undocumented)."""
+    item 11 — the real cap is provider-specific; item 15 — Alchemy's free tier
+    specifically caps eth_getLogs at 10 blocks, confirmed from the actual error body,
+    which is why the shrink floor here is 10 and not something more conservative-looking
+    like 50 — 50 was still too high and left the watcher stuck retrying forever)."""
     if not targets:
         return
     maker_topics = [_address_to_topic(t) for t in targets]
@@ -117,8 +120,8 @@ async def backfill(
                 }],
             )
         except (RuntimeError, httpx.HTTPStatusError) as exc:
-            if chunk > 50:
-                chunk = max(chunk // 2, 50)
+            if chunk > 10:
+                chunk = max(chunk // 2, 10)
                 logger.warning("eth_getLogs range rejected (%s), shrinking chunk to %d blocks", exc, chunk)
                 continue
             raise
@@ -146,6 +149,23 @@ async def _resolve_urls(settings) -> tuple[str, str]:
     ws_url = settings.polygon_ws_url
     http_url = settings.polygon_rpc_url or ws_url.replace("wss://", "https://").replace("ws://", "http://")
     return http_url, ws_url
+
+
+async def _watch_for_target_changes(targets_conn: asyncpg.Connection, current_targets: set[str], ws, interval_s: int = 15) -> None:
+    """The live subscription's topic filter is fixed to whatever targets existed at
+    connect time — `eth_subscribe` has no "update filter" call, so a target added
+    (or removed) mid-connection is otherwise invisible to chain until the next
+    disconnect/reconnect, which might not happen for hours. Poll for a change and
+    force a clean resubscribe by closing the socket ourselves — `_subscribe_once`
+    returning normally (not via exception) means the outer loop retries immediately,
+    no backoff, no WARN failover event, since this isn't a failure."""
+    while True:
+        await asyncio.sleep(interval_s)
+        latest = await get_watched_targets(targets_conn)
+        if latest != current_targets:
+            logger.info("target set changed (%d -> %d target(s)), reconnecting to pick it up", len(current_targets), len(latest))
+            await ws.close()
+            return
 
 
 async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets_conn: asyncpg.Connection, sub_conn: asyncpg.Connection, chunk_blocks: int) -> None:
@@ -183,24 +203,32 @@ async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets
                 raise RuntimeError(f"eth_subscribe failed: {ack}")
             logger.info("subscribed to OrderFilled logs (%d targets)", len(targets))
 
-            block_ts_cache: dict[int, dt.datetime] = {}
-            async for message in ws:
-                msg = json.loads(message)
-                if msg.get("method") != "eth_subscription":
-                    continue
-                log = msg["params"]["result"]
-                decoded = decode_order_filled_log(log)
-                block_num = decoded["block_number"]
-                if block_num not in block_ts_cache:
-                    block = await _rpc(client, http_url, "eth_getBlockByNumber", [hex(block_num), False])
-                    block_ts_cache[block_num] = dt.datetime.fromtimestamp(int(block["timestamp"], 16), tz=dt.timezone.utc)
-                    block_ts_cache = dict(list(block_ts_cache.items())[-64:])  # bounded cache
-                fill = target_fill_from_chain_log(
-                    decoded, decoded["maker"], block_ts_cache[block_num], dt.datetime.now(dt.timezone.utc)
-                )
-                if fill is not None:
-                    await insert_fill(sub_conn, fill, log)
-                await set_cursor(sub_conn, block_num)
+            watch_task = asyncio.create_task(_watch_for_target_changes(targets_conn, targets, ws))
+            try:
+                block_ts_cache: dict[int, dt.datetime] = {}
+                async for message in ws:
+                    msg = json.loads(message)
+                    if msg.get("method") != "eth_subscription":
+                        continue
+                    log = msg["params"]["result"]
+                    decoded = decode_order_filled_log(log)
+                    block_num = decoded["block_number"]
+                    if block_num not in block_ts_cache:
+                        block = await _rpc(client, http_url, "eth_getBlockByNumber", [hex(block_num), False])
+                        block_ts_cache[block_num] = dt.datetime.fromtimestamp(int(block["timestamp"], 16), tz=dt.timezone.utc)
+                        block_ts_cache = dict(list(block_ts_cache.items())[-64:])  # bounded cache
+                    fill = target_fill_from_chain_log(
+                        decoded, decoded["maker"], block_ts_cache[block_num], dt.datetime.now(dt.timezone.utc)
+                    )
+                    if fill is not None:
+                        await insert_fill(sub_conn, fill, log)
+                    await set_cursor(sub_conn, block_num)
+            finally:
+                watch_task.cancel()
+                try:
+                    await watch_task
+                except asyncio.CancelledError:
+                    pass
 
 
 async def run_chain_watcher(settings) -> None:
