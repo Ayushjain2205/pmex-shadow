@@ -57,7 +57,9 @@ def test_target_fill_only_built_when_target_is_maker():
     assert fill.notional_usd == Decimal("0.999999")
     assert fill.price == fill.notional_usd / fill.size
     assert fill.source == "chain"
-    assert fill.dedupe_key == f"{decoded['tx_hash']}:{decoded['log_index']}"
+    assert fill.dedupe_key == (
+        f"{TARGET}:{decoded['tx_hash']}:{decoded['token_id']}:BUY:0.670000:1.492536"
+    )
 
 
 def test_dataapi_trade_normalizes_consistently_with_chain_decode():
@@ -75,6 +77,23 @@ def test_dataapi_trade_normalizes_consistently_with_chain_decode():
     assert fill.price == Decimal("0.67")
     assert fill.size == Decimal("1.492536")
     assert fill.notional_usd == Decimal("0.67") * Decimal("1.492536")
+
+
+def test_chain_and_dataapi_dedupe_keys_match_for_the_same_real_trade():
+    """FR-W-6/FR-W-9: this is the whole point of the shared dedupe key — two
+    independently-shaped payloads describing the same fill must collapse onto the
+    same `target_fills.dedupe_key`, or the DB's unique constraint (and therefore
+    the NOTIFY-driven consumer) never sees them as duplicates."""
+    logs = _load_logs()
+    decoded = decode_order_filled_log(logs[2])
+    block_ts = dt.datetime(2026, 7, 29, 0, 0, tzinfo=dt.timezone.utc)
+    detected_at = dt.datetime(2026, 7, 29, tzinfo=dt.timezone.utc)
+    chain_fill = target_fill_from_chain_log(decoded, TARGET, block_ts, detected_at)
+
+    trade = json.loads((FIXTURES / "real_dataapi_trade.json").read_text())
+    dataapi_fill = target_fill_from_dataapi_trade(trade, detected_at)
+
+    assert chain_fill.dedupe_key == dataapi_fill.dedupe_key
 
 
 def test_vwap_for_walks_the_book_and_handles_thin_liquidity():

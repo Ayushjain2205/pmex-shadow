@@ -59,6 +59,24 @@ def decode_order_filled_log(log: dict[str, Any]) -> dict[str, Any]:
 # assuming which side (maker/taker amount) is collateral vs shares: that depends on the
 # owner's own side, which we already have.
 _BASE_UNIT_SCALE = Decimal(10) ** 6
+_DEDUPE_QUANTIZE = Decimal("0.000001")  # matches target_fills.price/size's NUMERIC(_,6) scale
+
+
+def _dedupe_key(target: str, tx_hash: str, token_id: str, side: Side, price: Decimal, size: Decimal) -> str:
+    """Cross-source trade identity (FR-W-6): chain and dataapi see the same real fill
+    through different payloads with no shared precise event id — the Data API's
+    `/trades` response has no log-index/order-hash equivalent (confirmed against the
+    raw payload, see docs/VERIFIED.md) — so identity is target+tx+token+side+price+size,
+    quantized to the column's own NUMERIC(_,6) scale so chain's raw division and
+    dataapi's already-rounded display price collapse to the same string for the same
+    trade. Only blind spot: the same wallet filling the same outcome token, same side,
+    at the exact same price *and* size, twice in one tx (matched against two different
+    counterparties) — collapses onto one row. Rare, and no worse than what the dataapi
+    path alone could ever tell apart anyway."""
+    return (
+        f"{target.lower()}:{tx_hash}:{token_id}:{side.value}:"
+        f"{price.quantize(_DEDUPE_QUANTIZE)}:{size.quantize(_DEDUPE_QUANTIZE)}"
+    )
 
 
 def target_fill_from_chain_log(
@@ -87,11 +105,12 @@ def target_fill_from_chain_log(
     shares = Decimal(share_amount) / _BASE_UNIT_SCALE
     notional_usd = Decimal(collateral_amount) / _BASE_UNIT_SCALE
     price = (notional_usd / shares) if shares > 0 else Decimal(0)
+    token_id = str(decoded["token_id"])
 
     return TargetFill(
-        dedupe_key=f"{decoded['tx_hash']}:{decoded['log_index']}",
+        dedupe_key=_dedupe_key(target, decoded["tx_hash"], token_id, side, price, shares),
         target=target.lower(),
-        token_id=str(decoded["token_id"]),
+        token_id=token_id,
         side=side,
         price=price,
         size=shares,
@@ -111,17 +130,15 @@ def target_fill_from_dataapi_trade(trade: dict[str, Any], detected_at: dt.dateti
     """
     price = Decimal(str(trade["price"]))
     size = Decimal(str(trade["size"]))
+    side = Side.BUY if trade["side"] == "BUY" else Side.SELL
+    token_id = str(trade["asset"])
+    target = trade["proxyWallet"].lower()
     block_ts = dt.datetime.fromtimestamp(int(trade["timestamp"]), tz=dt.timezone.utc)
-    # Data API doesn't expose a log index; the trade id (tx hash) is unique per trade
-    # record as returned by this endpoint — verified empirically, not assumed: repeated
-    # polls of the same window return the same transactionHash per distinct trade and
-    # never duplicate it under a different value.
-    dedupe_key = f"dataapi:{trade['transactionHash']}:{trade.get('asset')}:{trade['timestamp']}"
     return TargetFill(
-        dedupe_key=dedupe_key,
-        target=trade["proxyWallet"].lower(),
-        token_id=str(trade["asset"]),
-        side=Side.BUY if trade["side"] == "BUY" else Side.SELL,
+        dedupe_key=_dedupe_key(target, trade["transactionHash"], token_id, side, price, size),
+        target=target,
+        token_id=token_id,
+        side=side,
         price=price,
         size=size,
         notional_usd=price * size,
