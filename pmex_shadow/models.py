@@ -92,6 +92,24 @@ class MarketMeta:
 
 
 @dataclass(frozen=True)
+class ResolutionStatus:
+    """Gamma's `closed`/`outcomePrices` view of a market, used to credit *paper*
+    positions on resolution (ledger/redeem.py) — deliberately not conflated with the
+    on-chain `payoutDenominator` check FR-L-6 requires for live redemption
+    (docs/VERIFIED.md item 9: "a market merely showing 'resolved' in the UI" is
+    explicitly called out there as distinct from genuinely redeemable on-chain, and
+    that distinction exists to avoid live mode wasting real gas on a transaction that
+    isn't valid yet). Paper positions have no real on-chain holdings to check against
+    in the first place, so Gamma's view is the only signal available for them, not a
+    shortcut around the live-mode check.
+    """
+
+    token_id: str
+    closed: bool
+    won: bool | None  # None until closed; meaningless (not queried) if closed is False
+
+
+@dataclass(frozen=True)
 class TargetPolicyStats:
     """The slice of `target_stats` (§5) `decide()` needs: the size distribution for
     FR-P-3's percentile sizing, plus status (FR-T-2, FR-T-3) and the caller-computed
@@ -133,6 +151,12 @@ class LedgerState:
     deployed_usd: Decimal  # this bot's capital currently committed (sum of open cost basis)
     global_exposure_usd: Decimal  # across ALL bots, for the shared cap
     halted: bool  # FR-L-5: reconciler halts the bot on drift; decide() must respect it
+    realized_pnl_usd: Decimal  # all-time realized PnL, every position regardless of lifecycle —
+    # the envelope check needs this or it has no memory of cumulative losses: a
+    # position leaving 'open' drops out of deployed_usd and its capital reads as
+    # fully "returned" whether it actually redeemed at cost or was a total loss.
+    # Without this, decide() keeps sizing new trades against the full original
+    # envelope forever, even after realized losses have eaten into (or exceeded) it.
 
     def position_for(self, token_id: str) -> Position | None:
         for p in self.positions:

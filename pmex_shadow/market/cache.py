@@ -7,11 +7,12 @@ Phase 2 scope but deferred past this first cut; every call here hits Gamma live.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from decimal import Decimal
 
 import httpx
 
-from pmex_shadow.models import BookSnapshot, MarketMeta
+from pmex_shadow.models import BookSnapshot, MarketMeta, ResolutionStatus
 
 
 async def get_orderbook(clob_base_url: str, token_id: str) -> BookSnapshot | None:
@@ -109,3 +110,44 @@ async def get_market_meta(gamma_api_base_url: str, token_id: str) -> MarketMeta 
         event_id=str(event_id) if event_id else None,
         resolution_days_out=resolution_days_out,
     )
+
+
+async def get_resolution_status(gamma_api_base_url: str, token_id: str) -> ResolutionStatus | None:
+    """Whether `token_id`'s market has closed and, if so, whether this specific
+    outcome won — for crediting *paper* positions on resolution (FR-EXE-10), not for
+    live redemption (see ResolutionStatus's docstring for why those need different
+    signals). Returns None on a lookup failure — callers must treat that as "don't
+    know yet," never guess a result.
+
+    A still-open market's `clob_token_ids` query returns nothing without
+    `closed=true` (confirmed live, same asymmetry `queries._fetch_market_question`
+    already works around) — so an *open* market and a *lookup failure* both come back
+    empty here; that's fine, both mean "nothing to do yet" for this caller.
+
+    `outcomePrices` and `clobTokenIds` are both JSON-encoded **strings**, not native
+    arrays, despite how they print — confirmed by checking `type()` directly rather
+    than trusting how they looked in a first pass (they read as bare lists at a
+    glance). Each outcome's price resolves to exactly "1" (won) or "0" (lost) once
+    the market is closed.
+    """
+    url = f"{gamma_api_base_url.rstrip('/')}/markets"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, params={"clob_token_ids": token_id, "closed": "true"})
+    if resp.status_code != 200:
+        return None
+    markets = resp.json()
+    if not markets:
+        return None
+    m = markets[0]
+    if not m.get("closed"):
+        return ResolutionStatus(token_id=token_id, closed=False, won=None)
+
+    try:
+        clob_token_ids = json.loads(m["clobTokenIds"])
+        outcome_prices = json.loads(m["outcomePrices"])
+        idx = clob_token_ids.index(token_id)
+        won = Decimal(outcome_prices[idx]) == 1
+    except (KeyError, ValueError, TypeError, IndexError):
+        return None
+
+    return ResolutionStatus(token_id=token_id, closed=True, won=won)

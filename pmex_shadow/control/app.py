@@ -82,9 +82,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/bots/{bot_id}")
     async def bot_detail(request: Request, bot_id: str):
+        import json as _json
+
         async with app.state.pool.acquire() as conn:
             detail = await queries.bot_detail(conn, bot_id, settings.gamma_api_base_url)
-        return templates.TemplateResponse(request, "bot_detail.html", _ctx(request, bot_id=bot_id, active_nav="fleet", **detail))
+        equity_curve_json = _json.dumps([
+            {"t": row["bucket"].isoformat(), "v": float(row["cumulative_pnl"])} for row in detail["equity_curve"]
+        ])
+        return templates.TemplateResponse(
+            request, "bot_detail.html",
+            _ctx(request, bot_id=bot_id, active_nav="fleet", **detail, equity_curve_json=equity_curve_json),
+        )
 
     @app.get("/targets")
     async def targets(request: Request, message: str | None = None, error: str | None = None):

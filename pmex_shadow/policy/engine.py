@@ -129,7 +129,13 @@ def decide(
     # Clamp cascade (FR-P-5): max_position_usd -> envelope -> global cap -> concurrent positions
     usd = min(sized_usd, policy.sizing.max_position_usd)
 
-    deployable = bot.risk.envelope_usd * (Decimal(1) - policy.sizing.reserve_pct / Decimal(100))
+    # Envelope is capital, not a static ceiling: realized_pnl_usd (all-time, every
+    # closed position) has to shrink it as losses accumulate, or a bot keeps sizing
+    # new trades against its full original envelope forever, no matter how much it's
+    # actually lost — deployed_usd alone only tracks currently-open exposure, which
+    # returns to "available" the instant a position closes regardless of whether it
+    # closed at cost or as a total loss.
+    deployable = (bot.risk.envelope_usd + ledger.realized_pnl_usd) * (Decimal(1) - policy.sizing.reserve_pct / Decimal(100))
     available = deployable - ledger.deployed_usd
     if available <= 0:
         return skip("envelope_exhausted")

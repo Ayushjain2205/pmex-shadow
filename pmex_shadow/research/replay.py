@@ -115,6 +115,7 @@ async def run_replay(
         sim_positions: dict[str, Position] = {}
         deployed_usd = Decimal(0)
         global_exposure_usd = Decimal(0)  # single-bot replay: this bot IS the whole exposure
+        realized_pnl_usd = Decimal(0)  # mirrors the envelope's need to shrink on cumulative loss (policy/engine.py)
         book_history: dict[str, list[BookSnapshot]] = defaultdict(list)
         target_position_running: dict[tuple[str, str], Decimal] = defaultdict(Decimal)  # (target, token) -> cumulative shares
 
@@ -157,6 +158,7 @@ async def run_replay(
                 deployed_usd=deployed_usd,
                 global_exposure_usd=global_exposure_usd,
                 halted=False,
+                realized_pnl_usd=realized_pnl_usd,
             )
 
             decision = decide(
@@ -187,6 +189,7 @@ async def run_replay(
                         cost_reduction = (decision.shares / pos.shares) * pos.cost_basis_usd if pos.shares > 0 else Decimal(0)
                         deployed_usd = max(deployed_usd - cost_reduction, Decimal(0))
                         global_exposure_usd = max(global_exposure_usd - cost_reduction, Decimal(0))
+                        realized_pnl_usd += decision.notional_usd - cost_reduction
                         if remaining > 0:
                             sim_positions[decision.token_id] = Position(
                                 token_id=decision.token_id, shares=remaining, cost_basis_usd=pos.cost_basis_usd - cost_reduction

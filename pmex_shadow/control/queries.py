@@ -136,8 +136,12 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
     )
     equity_curve = await conn.fetch(
         """
-        SELECT date_trunc('hour', last_event_at) AS bucket, sum(realized_pnl_usd) AS pnl
-        FROM positions WHERE bot_id = $1 GROUP BY bucket ORDER BY bucket
+        SELECT bucket, sum(pnl) OVER (ORDER BY bucket) AS cumulative_pnl
+        FROM (
+            SELECT date_trunc('hour', last_event_at) AS bucket, sum(realized_pnl_usd) AS pnl
+            FROM positions WHERE bot_id = $1 GROUP BY bucket
+        ) hourly
+        ORDER BY bucket
         """,
         bot_id,
     )
@@ -145,6 +149,22 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
         "SELECT level, component, message, context, at FROM events WHERE bot_id = $1 ORDER BY at DESC LIMIT 100",
         bot_id,
     )
+
+    config_row = await conn.fetchrow("SELECT config FROM bot_config WHERE bot_id = $1 AND active", bot_id)
+    envelope_usd = _jsonb(config_row["config"]).get("risk", {}).get("envelope_usd") if config_row else None
+
+    summary = await conn.fetchrow(
+        """
+        SELECT
+            COALESCE(sum(realized_pnl_usd), 0) AS total_realized_pnl,
+            COALESCE(sum(cost_basis_usd) FILTER (WHERE lifecycle = 'open'), 0) AS deployed_usd,
+            count(*) FILTER (WHERE lifecycle IN ('redeemed', 'written_off', 'refunded') AND realized_pnl_usd > 0) AS wins,
+            count(*) FILTER (WHERE lifecycle IN ('redeemed', 'written_off', 'refunded') AND realized_pnl_usd <= 0) AS losses
+        FROM positions WHERE bot_id = $1
+        """,
+        bot_id,
+    )
+    closed_trades = summary["wins"] + summary["losses"]
 
     token_ids = {p["token_id"] for p in positions} | {i["token_id"] for i in recent_intents}
     titles = await get_market_titles(gamma_api_base_url, token_ids)
@@ -159,6 +179,13 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
         "skips_by_reason": skips_by_reason,
         "equity_curve": equity_curve,
         "logs": logs,
+        "envelope_usd": envelope_usd,
+        "total_realized_pnl": summary["total_realized_pnl"],
+        "deployed_usd": summary["deployed_usd"],
+        "wins": summary["wins"],
+        "losses": summary["losses"],
+        "closed_trades": closed_trades,
+        "win_rate": (summary["wins"] / closed_trades) if closed_trades > 0 else None,
     }
 
 

@@ -139,6 +139,7 @@ def make_ledger(**overrides) -> LedgerState:
         deployed_usd=Decimal("310"),
         global_exposure_usd=Decimal("1000"),
         halted=False,
+        realized_pnl_usd=Decimal("0"),
     )
     defaults.update(overrides)
     return LedgerState(**defaults)
@@ -301,6 +302,20 @@ def test_skip_volatility_guard():
 def test_skip_envelope_exhausted():
     d = run_decide(ledger=make_ledger(deployed_usd=Decimal("400")))  # deployable is 400 (80% of 500)
     assert isinstance(d, Skip) and d.reason == "envelope_exhausted"
+
+
+def test_cumulative_realized_losses_shrink_the_envelope():
+    """A bot that already lost its whole envelope must not keep sizing new trades
+    against the original, untouched envelope_usd — deployed_usd alone (currently-open
+    exposure) can't see this, since a closed position drops out of it regardless of
+    whether it closed at a profit or a total loss."""
+    d = run_decide(ledger=make_ledger(deployed_usd=Decimal("0"), realized_pnl_usd=Decimal("-500")))
+    assert isinstance(d, Skip) and d.reason == "envelope_exhausted"
+
+
+def test_realized_gains_grow_the_envelope():
+    d = run_decide(ledger=make_ledger(deployed_usd=Decimal("0"), realized_pnl_usd=Decimal("500")))
+    assert isinstance(d, Intent)
 
 
 def test_skip_global_exposure_cap():

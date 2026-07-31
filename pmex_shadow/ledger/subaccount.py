@@ -29,6 +29,12 @@ async def get_ledger_state(conn: asyncpg.Connection, bot_id: str, mode: str) -> 
     )
     global_exposure_usd = global_row["total"]
 
+    realized_row = await conn.fetchrow(
+        "SELECT COALESCE(sum(realized_pnl_usd), 0) AS total FROM positions WHERE bot_id = $1 AND mode = $2",
+        bot_id, mode,
+    )
+    realized_pnl_usd = realized_row["total"]
+
     # Halted if the most recent halt-type event (reconcile drift, FR-L-5, or an
     # explicit killswitch, FR-O-3) is more recent than the most recent resume — never
     # a time-window heuristic. A halt is sticky until `pmex-shadow bots resume`
@@ -44,4 +50,7 @@ async def get_ledger_state(conn: asyncpg.Connection, bot_id: str, mode: str) -> 
     )
     halted = last_halt is not None and (last_resume is None or last_halt["at"] > last_resume["at"])
 
-    return LedgerState(positions=positions, deployed_usd=deployed_usd, global_exposure_usd=global_exposure_usd, halted=halted)
+    return LedgerState(
+        positions=positions, deployed_usd=deployed_usd, global_exposure_usd=global_exposure_usd,
+        halted=halted, realized_pnl_usd=realized_pnl_usd,
+    )

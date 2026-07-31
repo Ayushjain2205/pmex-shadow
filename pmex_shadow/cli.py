@@ -221,6 +221,7 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
         deadman_task = None
         reconcile_task = None
         redeem_task = None
+        paper_resolution_task = None
         try:
             from pmex_shadow.control.config_write import seed_initial_config
             from pmex_shadow.watcher.heartbeat import run_heartbeat_loop
@@ -264,6 +265,17 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
                         settings.database_url, name, funder, mode, settings.polygon_rpc_url,
                         policy_file.exits.redeem_retry_days, clob.sdk_client, interval_s=3600,
                     ))
+            elif mode == "paper":
+                from pmex_shadow.ledger.redeem import run_paper_resolution_loop
+
+                # FR-EXE-10: paper positions have no real on-chain holdings to check
+                # resolution against (never touch a real wallet), so this uses Gamma's
+                # closed/outcomePrices view instead of redeem_task's on-chain check —
+                # without this a resolved market's position just sits open forever,
+                # eventually blocking every new trade on max_concurrent_positions.
+                paper_resolution_task = asyncio.create_task(run_paper_resolution_loop(
+                    settings.database_url, name, settings.gamma_api_base_url, interval_s=60,
+                ))
 
             router = ExecutionRouter(
                 bot_id=name, mode=mode, database_url=settings.database_url, clob_base_url=settings.clob_base_url,
@@ -297,7 +309,7 @@ def bot_run(name: str, live: bool = typer.Option(False, "--live")) -> None:
             await router.stop()
             for t in (router_task, consumer_task, heartbeat_task, bot_heartbeat_task):
                 t.cancel()
-            for t in (deadman_task, reconcile_task, redeem_task):
+            for t in (deadman_task, reconcile_task, redeem_task, paper_resolution_task):
                 if t:
                     t.cancel()
         finally:

@@ -5,10 +5,47 @@
 <h1>{{ bot_id }} <a href="/bots/{{ bot_id }}/params" class="button" style="font-size: 0.9rem;">params →</a></h1>
 
 <div class="card">
+  <div class="stat-row">
+    <div class="stat">
+      <div class="label">Wallet (envelope + realized)</div>
+      <div class="value">${{ "%.2f"|format((envelope_usd|float if envelope_usd else 0) + total_realized_pnl|float) }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Started with</div>
+      <div class="value">${{ "%.2f"|format(envelope_usd|float) if envelope_usd else "—" }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Session P&amp;L</div>
+      <div class="value" style="color: {{ 'inherit' if total_realized_pnl == 0 else ('#16a34a' if total_realized_pnl > 0 else '#dc2626') }}">{{ "%+.2f"|format(total_realized_pnl) }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Win rate</div>
+      <div class="value">{{ "%.0f%%"|format(win_rate * 100) if win_rate is not none else "—" }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Wins / losses</div>
+      <div class="value">{{ wins }} / {{ losses }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Deployed (open)</div>
+      <div class="value">${{ "%.2f"|format(deployed_usd) }}</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 1.5rem;">Cumulative P&amp;L</h3>
+  <div id="equity-chart" data-points="{{ equity_curve_json }}"></div>
+</div>
+
+{% set lifecycle_labels = {
+  "open": "Open", "pending_resolution": "Pending", "disputed": "Disputed",
+  "resolved": "Won (pending redemption)", "redeemed": "Win", "written_off": "Loss",
+  "voided": "Voided", "refunded": "Refunded",
+} %}
+<div class="card">
   <h3>Positions</h3>
   {% if not positions %}<p>No positions.</p>{% else %}
   <table>
-    <thead><tr><th>Market</th><th>Shares</th><th>Cost basis</th><th>Realized PnL</th><th>Lifecycle</th></tr></thead>
+    <thead><tr><th>Market</th><th>Shares</th><th>Cost basis</th><th>Realized PnL</th><th>Result</th></tr></thead>
     <tbody>
       {% for p in positions %}
       <tr>
@@ -16,7 +53,7 @@
         <td>{{ "%.4f"|format(p.shares) }}</td>
         <td>${{ "%.2f"|format(p.cost_basis_usd) }}</td>
         <td>${{ "%.2f"|format(p.realized_pnl_usd) }}</td>
-        <td><span class="pill pill-{{ p.lifecycle }}">{{ p.lifecycle }}</span></td>
+        <td><span class="pill pill-{{ p.lifecycle }}">{{ lifecycle_labels.get(p.lifecycle, p.lifecycle) }}</span></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -79,4 +116,90 @@
   </table>
   {% endif %}
 </div>
+
+<script>
+(function () {
+  const container = document.getElementById("equity-chart");
+  if (!container) return;
+  const points = JSON.parse(container.dataset.points || "[]");
+  if (points.length < 2) {
+    container.innerHTML = '<p style="opacity:0.6;font-size:0.9rem;">Not enough closed trades yet to chart.</p>';
+    return;
+  }
+
+  const width = container.clientWidth || 800, height = 220;
+  const padL = 56, padR = 12, padT = 12, padB = 24;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+
+  const times = points.map(p => new Date(p.t).getTime());
+  const values = points.map(p => p.v);
+  const tMin = Math.min(...times), tMax = Math.max(...times);
+  const vMin = Math.min(0, ...values), vMax = Math.max(0, ...values);
+  const vSpan = (vMax - vMin) || 1;
+
+  const x = t => padL + (tMax === tMin ? plotW / 2 : ((t - tMin) / (tMax - tMin)) * plotW);
+  const y = v => padT + plotH - ((v - vMin) / vSpan) * plotH;
+
+  const last = values[values.length - 1];
+  const color = last >= 0 ? "#16a34a" : "#dc2626";
+  const zeroY = y(0);
+
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(times[i]).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  const areaPath = `${linePath} L${x(times[times.length - 1]).toFixed(1)},${zeroY.toFixed(1)} L${x(times[0]).toFixed(1)},${zeroY.toFixed(1)} Z`;
+
+  const gridStroke = "color-mix(in srgb, CanvasText 15%, transparent)";
+  const svgNS = "http://www.w3.org/2000/svg";
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:${height}px;overflow:visible;" role="img" aria-label="Cumulative P&L over time">
+      <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${width - padR}" y2="${zeroY.toFixed(1)}" stroke="${gridStroke}" stroke-width="1"/>
+      <text x="${padL - 8}" y="${zeroY.toFixed(1)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="CanvasText" opacity="0.6">$0</text>
+      <text x="${padL - 8}" y="${(padT + 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="CanvasText" opacity="0.6">${vMax >= 0 ? "$" + vMax.toFixed(0) : ""}</text>
+      <text x="${padL - 8}" y="${(padT + plotH - 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="CanvasText" opacity="0.6">${vMin < 0 ? "$" + vMin.toFixed(0) : ""}</text>
+      <path d="${areaPath}" fill="${color}" opacity="0.10" stroke="none"/>
+      <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${x(times[times.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="4" fill="${color}" stroke="Canvas" stroke-width="2"/>
+      <text x="${x(times[times.length - 1]).toFixed(1)}" y="${(y(last) - 10).toFixed(1)}" text-anchor="end" font-size="12" font-weight="600" fill="CanvasText">${last >= 0 ? "+" : ""}$${last.toFixed(2)}</text>
+      <g id="hover-layer"></g>
+    </svg>
+    <div id="chart-tooltip" style="position:absolute;display:none;pointer-events:none;background:Canvas;border:1px solid color-mix(in srgb, CanvasText 20%, transparent);border-radius:6px;padding:0.4rem 0.6rem;font-size:0.8rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);"></div>
+  `;
+
+  const svg = container.querySelector("svg");
+  const hoverLayer = container.querySelector("#hover-layer");
+  const tooltip = container.querySelector("#chart-tooltip");
+  container.style.position = "relative";
+
+  const crosshair = document.createElementNS(svgNS, "line");
+  crosshair.setAttribute("y1", padT);
+  crosshair.setAttribute("y2", padT + plotH);
+  crosshair.setAttribute("stroke", gridStroke);
+  crosshair.setAttribute("stroke-width", "1");
+  crosshair.style.display = "none";
+  hoverLayer.appendChild(crosshair);
+
+  svg.addEventListener("pointermove", (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * width;
+    const targetT = tMin + ((px - padL) / plotW) * (tMax - tMin);
+    let nearest = 0, bestDist = Infinity;
+    times.forEach((t, i) => { const d = Math.abs(t - targetT); if (d < bestDist) { bestDist = d; nearest = i; } });
+
+    const cx = x(times[nearest]);
+    crosshair.setAttribute("x1", cx.toFixed(1));
+    crosshair.setAttribute("x2", cx.toFixed(1));
+    crosshair.style.display = "block";
+
+    const d = new Date(times[nearest]);
+    tooltip.innerHTML = `<strong>${values[nearest] >= 0 ? "+" : ""}$${values[nearest].toFixed(2)}</strong><br><span style="opacity:0.6">${d.toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>`;
+    tooltip.style.display = "block";
+    tooltip.style.left = Math.min(cx + 12, width - 140) + "px";
+    tooltip.style.top = "4px";
+  });
+  svg.addEventListener("pointerleave", () => {
+    crosshair.style.display = "none";
+    tooltip.style.display = "none";
+  });
+})();
+</script>
 {% endblock %}
