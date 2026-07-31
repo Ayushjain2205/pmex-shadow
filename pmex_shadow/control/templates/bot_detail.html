@@ -1,6 +1,19 @@
 {% extends "base.html" %}
 {% block title %}{{ bot_id }} — pmex-shadow{% endblock %}
 {% block content %}
+{% macro pagination(pg, which, pos_pg, dec_pg, log_pg) %}
+  {% if pg.total_pages > 1 %}
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.75rem;font-size:0.85rem;">
+    {% if pg.page > 1 %}
+    <a href="?pos_page={{ pg.page - 1 if which == 'pos' else pos_pg.page }}&dec_page={{ pg.page - 1 if which == 'dec' else dec_pg.page }}&log_page={{ pg.page - 1 if which == 'log' else log_pg.page }}">← Prev</a>
+    {% else %}<span style="opacity:0.35;">← Prev</span>{% endif %}
+    <span style="opacity:0.65;">Page {{ pg.page }} of {{ pg.total_pages }} · {{ pg.total }} total</span>
+    {% if pg.page < pg.total_pages %}
+    <a href="?pos_page={{ pg.page + 1 if which == 'pos' else pos_pg.page }}&dec_page={{ pg.page + 1 if which == 'dec' else dec_pg.page }}&log_page={{ pg.page + 1 if which == 'log' else log_pg.page }}">Next →</a>
+    {% else %}<span style="opacity:0.35;">Next →</span>{% endif %}
+  </div>
+  {% endif %}
+{% endmacro %}
 <p><a href="/">← Fleet</a></p>
 <h1>{{ bot_id }} <a href="/bots/{{ bot_id }}/params" class="button" style="font-size: 0.9rem;">params →</a></h1>
 
@@ -58,6 +71,7 @@
       {% endfor %}
     </tbody>
   </table>
+  {{ pagination(pos_pg, 'pos', pos_pg, dec_pg, log_pg) }}
   {% endif %}
 </div>
 
@@ -99,6 +113,7 @@
       {% endfor %}
     </tbody>
   </table>
+  {{ pagination(dec_pg, 'dec', pos_pg, dec_pg, log_pg) }}
   {% endif %}
 </div>
 
@@ -118,6 +133,7 @@
       {% endfor %}
     </tbody>
   </table>
+  {{ pagination(log_pg, 'log', pos_pg, dec_pg, log_pg) }}
   {% endif %}
 </div>
 

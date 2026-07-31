@@ -195,18 +195,38 @@ async def get_market_titles(gamma_api_base_url: str, token_ids: set[str]) -> dic
     return titles
 
 
-async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: str) -> dict:
+POSITIONS_PAGE_SIZE = 20
+DECISIONS_PAGE_SIZE = 25
+LOGS_PAGE_SIZE = 30
+
+
+def _page_info(page: int, page_size: int, total: int) -> dict:
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    page = min(max(page, 1), total_pages)
+    return {"page": page, "page_size": page_size, "total": total, "total_pages": total_pages, "offset": (page - 1) * page_size}
+
+
+async def bot_detail(
+    conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: str,
+    pos_page: int = 1, dec_page: int = 1, log_page: int = 1,
+) -> dict:
+    pos_total = await conn.fetchval("SELECT count(*) FROM positions WHERE bot_id = $1", bot_id)
+    pos_pg = _page_info(pos_page, POSITIONS_PAGE_SIZE, pos_total)
     positions = [dict(r) for r in await conn.fetch(
-        "SELECT token_id, shares, cost_basis_usd, realized_pnl_usd, lifecycle FROM positions WHERE bot_id = $1 ORDER BY last_event_at DESC LIMIT 50",
-        bot_id,
+        "SELECT token_id, shares, cost_basis_usd, realized_pnl_usd, lifecycle FROM positions "
+        "WHERE bot_id = $1 ORDER BY last_event_at DESC LIMIT $2 OFFSET $3",
+        bot_id, pos_pg["page_size"], pos_pg["offset"],
     )]
+
+    dec_total = await conn.fetchval("SELECT count(*) FROM intents WHERE bot_id = $1", bot_id)
+    dec_pg = _page_info(dec_page, DECISIONS_PAGE_SIZE, dec_total)
     recent_intents = [dict(r) for r in await conn.fetch(
         """
         SELECT i.decision, i.skip_reason, i.skip_detail, i.token_id, i.side, i.target_price, i.intended_price,
                i.intended_shares, i.target_percentile, i.created_at
-        FROM intents i WHERE i.bot_id = $1 ORDER BY i.created_at DESC LIMIT 50
+        FROM intents i WHERE i.bot_id = $1 ORDER BY i.created_at DESC LIMIT $2 OFFSET $3
         """,
-        bot_id,
+        bot_id, dec_pg["page_size"], dec_pg["offset"],
     )]
     for i in recent_intents:
         if i["skip_detail"] is not None:
@@ -234,9 +254,11 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
         """,
         bot_id,
     )
+    log_total = await conn.fetchval("SELECT count(*) FROM events WHERE bot_id = $1", bot_id)
+    log_pg = _page_info(log_page, LOGS_PAGE_SIZE, log_total)
     logs = await conn.fetch(
-        "SELECT level, component, message, context, at FROM events WHERE bot_id = $1 ORDER BY at DESC LIMIT 100",
-        bot_id,
+        "SELECT level, component, message, context, at FROM events WHERE bot_id = $1 ORDER BY at DESC LIMIT $2 OFFSET $3",
+        bot_id, log_pg["page_size"], log_pg["offset"],
     )
 
     config_row = await conn.fetchrow("SELECT config FROM bot_config WHERE bot_id = $1 AND active", bot_id)
@@ -275,6 +297,7 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
         "losses": summary["losses"],
         "closed_trades": closed_trades,
         "win_rate": (summary["wins"] / closed_trades) if closed_trades > 0 else None,
+        "pos_pg": pos_pg, "dec_pg": dec_pg, "log_pg": log_pg,
     }
 
 

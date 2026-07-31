@@ -81,11 +81,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(request, "fleet.html", _ctx(request, bots=bots, active_nav="fleet"))
 
     @app.get("/bots/{bot_id}")
-    async def bot_detail(request: Request, bot_id: str):
+    async def bot_detail(request: Request, bot_id: str, pos_page: int = 1, dec_page: int = 1, log_page: int = 1):
         import json as _json
 
         async with app.state.pool.acquire() as conn:
-            detail = await queries.bot_detail(conn, bot_id, settings.gamma_api_base_url)
+            detail = await queries.bot_detail(conn, bot_id, settings.gamma_api_base_url, pos_page, dec_page, log_page)
         equity_curve_json = _json.dumps([
             {"t": row["bucket"].isoformat(), "v": float(row["cumulative_pnl"])} for row in detail["equity_curve"]
         ])
