@@ -182,7 +182,7 @@ async def credit_resolved_paper_positions(conn: asyncpg.Connection, *, bot_id: s
         if should_write_off(facts):
             realized = -row["cost_basis_usd"]
             await conn.execute(
-                "UPDATE positions SET shares = 0, cost_basis_usd = 0, realized_pnl_usd = realized_pnl_usd + $2, "
+                "UPDATE positions SET realized_pnl_usd = realized_pnl_usd + $2, "
                 "lifecycle = 'written_off', last_event_at = now() WHERE id = $1",
                 row["id"], realized,
             )
@@ -195,7 +195,7 @@ async def credit_resolved_paper_positions(conn: asyncpg.Connection, *, bot_id: s
         payout = row["shares"]  # $1/winning share, guaranteed by the CTF payout mechanics
         realized = payout - row["cost_basis_usd"]
         await conn.execute(
-            "UPDATE positions SET shares = 0, cost_basis_usd = 0, realized_pnl_usd = realized_pnl_usd + $2, "
+            "UPDATE positions SET realized_pnl_usd = realized_pnl_usd + $2, "
             "lifecycle = 'redeemed', last_event_at = now() WHERE id = $1",
             row["id"], realized,
         )
