@@ -22,6 +22,85 @@ def _jsonb(value):
     return value if isinstance(value, dict) else json.loads(value)
 
 
+# (human label, category) per PRD §6 skip reason. Category drives color in the UI —
+# Seven categories, not three — three collapsed slippage_guard/stale_fill/
+# volatility_guard (the reasons that actually dominate real skip volume) into one
+# identical color, which looked exactly as monochrome as no categorization at all.
+# Each category below maps to its own hue in base.html's .pill-cat-* — capital
+# (red), position slots (teal), operational halt (slate), timing (yellow),
+# price slipped (orange), market chaos (rose), and everything filtered by a
+# selector/sizing rule by design (violet).
+_SKIP_REASON_META: dict[str, tuple[str, str]] = {
+    "envelope_exhausted": ("Capital exhausted", "capital"),
+    "global_exposure_cap": ("Fleet exposure cap hit", "capital"),
+    "max_concurrent_positions": ("Position limit reached", "position_limit"),
+    "bot_halted": ("Bot halted", "halted"),
+    "target_paused": ("Target paused", "halted"),
+    "stale_fill": ("Fill too old", "timing"),
+    "slippage_guard": ("Price moved too far", "slippage"),
+    "volatility_guard": ("Market too volatile", "chaos"),
+    "selector_category": ("Category filtered", "filtered"),
+    "selector_liquidity": ("Book too thin", "filtered"),
+    "selector_notional": ("Target trade too small", "filtered"),
+    "selector_resolution_window": ("Resolves too far out", "filtered"),
+    "unknown_category": ("Category unknown", "filtered"),
+    "market_not_tradeable": ("Market not tradeable", "filtered"),
+    "below_target_percentile": ("Below sizing threshold", "filtered"),
+    "below_min_order": ("Order too small", "filtered"),
+    "no_position_to_exit": ("Nothing to sell", "filtered"),
+    "netted_out": ("Netted against another intent", "filtered"),
+}
+
+
+def _skip_label(reason: str) -> str:
+    return _SKIP_REASON_META.get(reason, (reason, "filtered"))[0]
+
+
+def _skip_category(reason: str) -> str:
+    return _SKIP_REASON_META.get(reason, (reason, "filtered"))[1]
+
+
+def _skip_summary(reason: str, detail: dict | None) -> str | None:
+    """One human-readable line of the actual numbers behind a skip — the whole
+    point of Skip.detail existing. Returns None where the label alone already says
+    everything (bot_halted, no_position_to_exit, etc.) rather than padding with
+    nothing.
+    """
+    if not detail:
+        return None
+    if "reason" in detail and len(detail) == 1:
+        return {"no_liquidity_on_book_side": "No liquidity on that side of the book",
+                "no_current_book_to_compare": "No current book to compare against",
+                "no_history_in_window": "No book history in the window yet"}.get(detail["reason"], detail["reason"])
+    if reason == "stale_fill":
+        return f"{detail['age_s']:.0f}s old (limit {detail['max_fill_age_s']}s)"
+    if reason == "slippage_guard":
+        return f"{detail['adverse_ticks']:.1f} ticks adverse — target ${detail['target_price']}, best ${detail['best_price']} (limit {detail['max_slippage_ticks']} ticks)"
+    if reason == "volatility_guard":
+        return f"{detail['move_ticks']:.1f} ticks moved in {detail['window_s']}s (limit {detail['max_ticks']})"
+    if reason == "envelope_exhausted":
+        return f"${detail['available_usd']:.2f} available (envelope ${detail['envelope_usd']:.2f}, realized ${detail['realized_pnl_usd']:.2f})"
+    if reason == "global_exposure_cap":
+        return f"${detail['global_exposure_usd']:.2f} / ${detail['global_max_exposure_usd']:.2f} fleet-wide"
+    if reason == "max_concurrent_positions":
+        return f"{detail['current_open_positions']} / {detail['max_concurrent_positions']} positions open"
+    if reason == "below_target_percentile":
+        return f"{detail['target_percentile']:.1f}th percentile (need {detail['min_required_percentile']:.1f}th+)"
+    if reason == "below_min_order":
+        return f"${detail['sized_usd']:.2f} sized (min ${detail['min_order_usd']:.2f})"
+    if reason == "selector_category":
+        return f"{detail['market_category']!r} not in {detail['allowed_categories']}"
+    if reason == "selector_liquidity":
+        return f"${detail['book_liquidity_usd']:.2f} liquidity (need ${detail['min_required_usd']:.2f}+)"
+    if reason == "selector_notional":
+        return f"${detail['fill_notional_usd']:.2f} fill (need ${detail['min_required_usd']:.2f}+)"
+    if reason == "selector_resolution_window":
+        return f"{detail['resolution_days_out']}d out (limit {detail['max_allowed_days']}d)"
+    if reason == "target_paused":
+        return f"status: {detail['target_status']}"
+    return " · ".join(f"{k}: {v}" for k, v in detail.items())
+
+
 async def fleet_view(conn: asyncpg.Connection) -> list[dict]:
     """Per bot: mode, watcher-relative lag, exposure vs envelope, today's PnL, skip
     rate, last fill — the fleet-view screen (design doc §3.8)."""
@@ -123,17 +202,27 @@ async def bot_detail(conn: asyncpg.Connection, bot_id: str, gamma_api_base_url: 
     )]
     recent_intents = [dict(r) for r in await conn.fetch(
         """
-        SELECT i.decision, i.skip_reason, i.token_id, i.side, i.target_price, i.intended_price,
+        SELECT i.decision, i.skip_reason, i.skip_detail, i.token_id, i.side, i.target_price, i.intended_price,
                i.intended_shares, i.target_percentile, i.created_at
         FROM intents i WHERE i.bot_id = $1 ORDER BY i.created_at DESC LIMIT 50
         """,
         bot_id,
     )]
-    skips_by_reason = await conn.fetch(
+    for i in recent_intents:
+        if i["skip_detail"] is not None:
+            i["skip_detail"] = _jsonb(i["skip_detail"])
+        if i["skip_reason"]:
+            i["skip_label"] = _skip_label(i["skip_reason"])
+            i["skip_category"] = _skip_category(i["skip_reason"])
+            i["skip_summary"] = _skip_summary(i["skip_reason"], i["skip_detail"])
+    skips_by_reason = [dict(r) for r in await conn.fetch(
         "SELECT skip_reason, count(*) AS n FROM intents WHERE bot_id = $1 AND decision = 'SKIP' "
         "AND created_at >= now() - interval '7 days' GROUP BY skip_reason ORDER BY n DESC",
         bot_id,
-    )
+    )]
+    for s in skips_by_reason:
+        s["skip_label"] = _skip_label(s["skip_reason"])
+        s["skip_category"] = _skip_category(s["skip_reason"])
     equity_curve = await conn.fetch(
         """
         SELECT bucket, sum(pnl) OVER (ORDER BY bucket) AS cumulative_pnl

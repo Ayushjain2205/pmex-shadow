@@ -49,18 +49,19 @@ def decide(
     market: MarketMeta,
     now: dt.datetime,
 ) -> Decision:
-    def skip(reason: str) -> Skip:
-        return Skip(bot_id=bot.name, fill=fill, reason=reason)
+    def skip(reason: str, detail: dict | None = None) -> Skip:
+        return Skip(bot_id=bot.name, fill=fill, reason=reason, detail=detail)
 
     # --- Bot/target state (FR-L-5, FR-T-2..4) ---
     if ledger.halted:
         return skip("bot_halted")
     if target.status in _PAUSED_STATUSES:
-        return skip("target_paused")
+        return skip("target_paused", {"target_status": target.status})
 
     # --- Staleness (FR-P-9) ---
-    if not staleness_guard(fill, policy.max_fill_age_s, now):
-        return skip("stale_fill")
+    fresh, staleness_detail = staleness_guard(fill, policy.max_fill_age_s, now)
+    if not fresh:
+        return skip("stale_fill", staleness_detail)
 
     # --- Selectors (FR-P-2): AND, absent = no constraint ---
     sel = bot.selectors
@@ -68,16 +69,16 @@ def decide(
         if market.category is None:
             return skip("unknown_category")  # FR-M-3: fail closed, never guess
         if market.category not in sel.categories:
-            return skip("selector_category")
+            return skip("selector_category", {"market_category": market.category, "allowed_categories": sel.categories})
     if sel.min_book_liquidity_usd is not None:
         liquidity = sum((p * s for p, s in book.bids), Decimal(0)) + sum((p * s for p, s in book.asks), Decimal(0))
         if liquidity < sel.min_book_liquidity_usd:
-            return skip("selector_liquidity")
+            return skip("selector_liquidity", {"book_liquidity_usd": float(liquidity), "min_required_usd": float(sel.min_book_liquidity_usd)})
     if sel.min_target_notional_usd is not None and fill.notional_usd < sel.min_target_notional_usd:
-        return skip("selector_notional")
+        return skip("selector_notional", {"fill_notional_usd": float(fill.notional_usd), "min_required_usd": float(sel.min_target_notional_usd)})
     if sel.max_time_to_resolution_days is not None:
         if market.resolution_days_out is None or market.resolution_days_out > sel.max_time_to_resolution_days:
-            return skip("selector_resolution_window")
+            return skip("selector_resolution_window", {"resolution_days_out": market.resolution_days_out, "max_allowed_days": sel.max_time_to_resolution_days})
     if not market.tradeable:
         return skip("market_not_tradeable")
 
@@ -88,14 +89,15 @@ def decide(
         if shares <= 0:
             return skip("no_position_to_exit")
 
-        ref_price = slippage_guard(fill, book, policy.max_slippage_ticks, market.tick_size)
+        ref_price, slippage_detail = slippage_guard(fill, book, policy.max_slippage_ticks, market.tick_size)
         if ref_price is None:
-            return skip("slippage_guard")
-        if not volatility_guard(
+            return skip("slippage_guard", slippage_detail)
+        vol_ok, vol_detail = volatility_guard(
             book, book_history, policy.volatility_guard.window_s, policy.volatility_guard.max_ticks,
             market.tick_size, now,
-        ):
-            return skip("volatility_guard")
+        )
+        if not vol_ok:
+            return skip("volatility_guard", vol_detail)
 
         return Intent(
             bot_id=bot.name,
@@ -112,16 +114,19 @@ def decide(
     # --- Entry path (FR-P-3, FR-P-4, FR-P-6) ---
     percentile = percentile_of_value(fill.notional_usd, target)
     if percentile < policy.sizing.min_target_size_percentile:
-        return skip("below_target_percentile")
+        return skip("below_target_percentile", {
+            "target_percentile": float(percentile), "min_required_percentile": float(policy.sizing.min_target_size_percentile),
+        })
 
-    ref_price = slippage_guard(fill, book, policy.max_slippage_ticks, market.tick_size)
+    ref_price, slippage_detail = slippage_guard(fill, book, policy.max_slippage_ticks, market.tick_size)
     if ref_price is None:
-        return skip("slippage_guard")
-    if not volatility_guard(
+        return skip("slippage_guard", slippage_detail)
+    vol_ok, vol_detail = volatility_guard(
         book, book_history, policy.volatility_guard.window_s, policy.volatility_guard.max_ticks,
         market.tick_size, now,
-    ):
-        return skip("volatility_guard")
+    )
+    if not vol_ok:
+        return skip("volatility_guard", vol_detail)
 
     mult = multiplier_for_percentile(percentile, policy.sizing.curve)
     sized_usd = policy.sizing.base_unit_usd * mult
@@ -138,21 +143,29 @@ def decide(
     deployable = (bot.risk.envelope_usd + ledger.realized_pnl_usd) * (Decimal(1) - policy.sizing.reserve_pct / Decimal(100))
     available = deployable - ledger.deployed_usd
     if available <= 0:
-        return skip("envelope_exhausted")
+        return skip("envelope_exhausted", {
+            "envelope_usd": float(bot.risk.envelope_usd), "realized_pnl_usd": float(ledger.realized_pnl_usd),
+            "deployed_usd": float(ledger.deployed_usd), "available_usd": float(available),
+        })
     usd = min(usd, available)
 
     global_available = global_risk.global_max_exposure_usd - ledger.global_exposure_usd
     if global_available <= 0:
-        return skip("global_exposure_cap")
+        return skip("global_exposure_cap", {
+            "global_max_exposure_usd": float(global_risk.global_max_exposure_usd),
+            "global_exposure_usd": float(ledger.global_exposure_usd),
+        })
     usd = min(usd, global_available)
 
     existing_position = ledger.position_for(fill.token_id)
     if existing_position is None and len(ledger.positions) >= policy.sizing.max_concurrent_positions:
-        return skip("max_concurrent_positions")
+        return skip("max_concurrent_positions", {
+            "current_open_positions": len(ledger.positions), "max_concurrent_positions": policy.sizing.max_concurrent_positions,
+        })
 
     sized = shares_from_usd(usd, ref_price, policy.sizing.min_order_usd)
     if sized is None:
-        return skip("below_min_order")
+        return skip("below_min_order", {"sized_usd": float(usd), "min_order_usd": float(policy.sizing.min_order_usd)})
     shares, notional = sized
 
     # Limit price adds one tick beyond the reference price for marketability — sizing

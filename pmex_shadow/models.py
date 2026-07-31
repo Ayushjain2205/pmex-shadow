@@ -183,6 +183,9 @@ class Skip:
     bot_id: str
     fill: TargetFill
     reason: str  # stable machine-readable token, see PRD §6
+    detail: dict | None = None  # the actual numbers behind `reason` — e.g. stale_fill's
+    # age_s vs max_fill_age_s, slippage_guard's adverse_ticks vs max_slippage_ticks —
+    # so a skip is legible without re-deriving it from raw fill/book data by hand
 
 
 Decision = Intent | Skip

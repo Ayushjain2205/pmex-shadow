@@ -235,6 +235,7 @@ def test_skip_stale_fill():
     old_fill = make_fill(block_ts=NOW - dt.timedelta(seconds=60))
     d = run_decide(fill=old_fill)
     assert isinstance(d, Skip) and d.reason == "stale_fill"
+    assert d.detail == {"age_s": 60.0, "max_fill_age_s": 30}
 
 
 def test_skip_unknown_category():
@@ -291,6 +292,7 @@ def test_skip_slippage_guard():
     wide_book = make_book(asks=[(Decimal("0.90"), Decimal("100000"))])
     d = run_decide(book=wide_book)
     assert isinstance(d, Skip) and d.reason == "slippage_guard"
+    assert d.detail == {"target_price": "0.62", "best_price": "0.90", "adverse_ticks": 28.0, "max_slippage_ticks": 2}
 
 
 def test_skip_volatility_guard():

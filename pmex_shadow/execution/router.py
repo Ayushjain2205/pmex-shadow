@@ -39,12 +39,13 @@ async def insert_intent_row(conn: asyncpg.Connection, decision: Decision, fill_i
     if isinstance(decision, Skip):
         row = await conn.fetchrow(
             """
-            INSERT INTO intents (bot_id, dedupe_key, fill_id, decision, skip_reason, token_id, side, target_price, mode)
-            VALUES ($1, $2, $3, 'SKIP', $4, $5, $6, $7, $8)
+            INSERT INTO intents (bot_id, dedupe_key, fill_id, decision, skip_reason, skip_detail, token_id, side, target_price, mode)
+            VALUES ($1, $2, $3, 'SKIP', $4, $5, $6, $7, $8, $9)
             ON CONFLICT (bot_id, dedupe_key) DO NOTHING
             RETURNING id
             """,
             decision.bot_id, decision.fill.dedupe_key, fill_id, decision.reason,
+            json.dumps(decision.detail) if decision.detail is not None else None,
             decision.fill.token_id, decision.fill.side.value, decision.fill.price, mode,
         )
     else:
