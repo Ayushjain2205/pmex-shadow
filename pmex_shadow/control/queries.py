@@ -28,8 +28,13 @@ def _jsonb(value):
 # identical color, which looked exactly as monochrome as no categorization at all.
 # Each category below maps to its own hue in base.html's .pill-cat-* — capital
 # (red), position slots (teal), operational halt (slate), timing (yellow),
-# price slipped (orange), market chaos (rose), and everything filtered by a
-# selector/sizing rule by design (violet).
+# price slipped (orange), market chaos (rose), everything filtered by a
+# selector/sizing rule by design (violet), and data_gap (sky) — added alongside
+# no_orderbook/no_market_meta/target_not_registered: these aren't a decide() verdict
+# at all, they're consumer.py giving up *before* decide() runs because a lookup came
+# back empty. Previously that was a bare `return` with nothing recorded anywhere;
+# now it's a real row like everything else, so it needed its own category rather
+# than being misfiled under "filtered" (which is specifically selector/sizing rules).
 _SKIP_REASON_META: dict[str, tuple[str, str]] = {
     "envelope_exhausted": ("Capital exhausted", "capital"),
     "global_exposure_cap": ("Fleet exposure cap hit", "capital"),
@@ -49,6 +54,9 @@ _SKIP_REASON_META: dict[str, tuple[str, str]] = {
     "below_min_order": ("Order too small", "filtered"),
     "no_position_to_exit": ("Nothing to sell", "filtered"),
     "netted_out": ("Netted against another intent", "filtered"),
+    "no_orderbook": ("No orderbook available", "data_gap"),
+    "no_market_meta": ("Market metadata unavailable", "data_gap"),
+    "target_not_registered": ("Target not registered yet", "data_gap"),
 }
 
 
@@ -98,6 +106,10 @@ def _skip_summary(reason: str, detail: dict | None) -> str | None:
         return f"{detail['resolution_days_out']}d out (limit {detail['max_allowed_days']}d)"
     if reason == "target_paused":
         return f"status: {detail['target_status']}"
+    if reason in ("no_orderbook", "no_market_meta"):
+        return f"token {detail['token_id'][:12]}…"
+    if reason == "target_not_registered":
+        return f"{detail['target']} not in target_stats"
     return " · ".join(f"{k}: {v}" for k, v in detail.items())
 
 

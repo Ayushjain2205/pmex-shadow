@@ -215,5 +215,13 @@ SKIP_REASONS = frozenset(
         # of the above — it's not a capital/guard/selector rejection, there's simply
         # no position to scale FR-P-11's exit fraction against.
         "no_position_to_exit",
+        # These three are raised by execution/consumer.py's _handle_fill(), before
+        # decide() is ever called — not from within the pure policy function, so they
+        # don't fit any guard/selector/capital category either. Previously these were
+        # bare `return`s with no intents row and no visible log line at all (found
+        # investigating why 69% of fills for some targets had no decision recorded).
+        "no_orderbook",
+        "no_market_meta",
+        "target_not_registered",
     }
 )

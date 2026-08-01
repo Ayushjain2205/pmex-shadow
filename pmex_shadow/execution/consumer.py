@@ -19,7 +19,7 @@ from pmex_shadow.config import BotConfig, PolicyFile
 from pmex_shadow.execution.router import ExecutionRouter, insert_intent_row
 from pmex_shadow.ledger.subaccount import get_ledger_state
 from pmex_shadow.market.cache import get_market_meta, get_orderbook
-from pmex_shadow.models import BookSnapshot, Intent, Side, TargetFill, TargetPolicyStats
+from pmex_shadow.models import BookSnapshot, Intent, Side, Skip, TargetFill, TargetPolicyStats
 from pmex_shadow.policy.engine import decide
 
 logger = logging.getLogger("pmex_shadow.execution.consumer")
@@ -157,19 +157,33 @@ class BotConsumer:
 
         book = await get_orderbook(self.clob_base_url, fill.token_id)
         if book is None:
-            logger.debug("no orderbook for %s, cannot evaluate fill %d", fill.token_id, fill_id)
+            logger.info("no orderbook for %s, cannot evaluate fill %d", fill.token_id, fill_id)
+            skip = Skip(bot_id=self.bot.name, fill=fill, reason="no_orderbook", detail={"token_id": fill.token_id})
+            await insert_intent_row(conn, skip, fill_id, self.bot.mode)
             return
 
+        # Cache hits only, never misses (found alongside the silent-drop bug below):
+        # caching a None here would permanently blacklist this token from evaluation
+        # for the life of the process on a single transient Gamma lookup failure, long
+        # after the underlying issue clears.
         if fill.token_id not in self._market_cache:
-            self._market_cache[fill.token_id] = await get_market_meta(self.gamma_api_base_url, fill.token_id)
-        market = self._market_cache[fill.token_id]
+            meta = await get_market_meta(self.gamma_api_base_url, fill.token_id)
+            if meta is not None:
+                self._market_cache[fill.token_id] = meta
+        market = self._market_cache.get(fill.token_id)
         if market is None:
+            logger.info("no market metadata for %s, cannot evaluate fill %d", fill.token_id, fill_id)
+            skip = Skip(bot_id=self.bot.name, fill=fill, reason="no_market_meta", detail={"token_id": fill.token_id})
+            await insert_intent_row(conn, skip, fill_id, self.bot.mode)
             return
 
         target_row = await conn.fetchrow(
             "SELECT size_p50, size_p60, size_p80, size_p95, status FROM target_stats WHERE target = $1", fill.target,
         )
         if target_row is None:
+            logger.info("target %s not in target_stats, cannot evaluate fill %d", fill.target, fill_id)
+            skip = Skip(bot_id=self.bot.name, fill=fill, reason="target_not_registered", detail={"target": fill.target})
+            await insert_intent_row(conn, skip, fill_id, self.bot.mode)
             return
 
         position_before = await self._target_position_before(conn, fill, fill_id)

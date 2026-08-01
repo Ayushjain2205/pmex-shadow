@@ -233,7 +233,13 @@ async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets
 
 async def run_chain_watcher(settings) -> None:
     """Reconnect-forever loop with fallback RPC failover (FR-W-5) and backfill-on-gap
-    (FR-W-3/4). Every failover is logged as an `events` row at WARN."""
+    (FR-W-3/4). Every disconnect is logged as an `events` row at WARN — not just the
+    ones that trigger failover — since `logger.warning()` alone doesn't survive a
+    container restart, and a reconnect this loop treats as routine is exactly what
+    later produces a stale, unevaluated backfill batch downstream (found investigating
+    why 69% of fills for some targets had no intents row: median chain-side lag on
+    those was ~17 minutes, i.e. backfill catch-up after a reconnect, not real-time
+    processing — and there was no durable record of why any given reconnect happened)."""
     http_url, primary_ws = await _resolve_urls(settings)
     fallback_ws = settings.polygon_ws_url_fallback
 
@@ -249,6 +255,11 @@ async def run_chain_watcher(settings) -> None:
                 backoff_s = 1
             except Exception as exc:
                 logger.warning("chain watcher disconnected (%s), reconnecting in %ds", exc, backoff_s)
+                await targets_conn.execute(
+                    "INSERT INTO events (level, component, message, context) VALUES ('WARN', 'watcher.chain', $1, $2)",
+                    "disconnected, reconnecting",
+                    json.dumps({"ws_url": ws_url, "using_fallback": use_fallback, "backoff_s": backoff_s, "error": str(exc)}),
+                )
                 if not use_fallback and fallback_ws:
                     use_fallback = True
                     await targets_conn.execute(
