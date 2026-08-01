@@ -120,14 +120,29 @@ class SizingCurvePoint(BaseModel):
 
 class SizingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["target_size_percentile"] = "target_size_percentile"
-    base_unit_usd: Decimal
-    curve: list[SizingCurvePoint]
+    mode: Literal["target_size_percentile", "fixed_usd"] = "target_size_percentile"
+    # base_unit_usd/curve only apply to target_size_percentile; fixed_usd only to
+    # fixed_usd — both Optional here and cross-checked in the validator below rather
+    # than split into two SizingConfig subclasses, so bots/*.yaml and policy.yaml keep
+    # one flat "sizing:" block regardless of mode.
+    base_unit_usd: Decimal | None = None
+    curve: list[SizingCurvePoint] | None = None
+    fixed_usd: Decimal | None = None
     min_target_size_percentile: Decimal
     min_order_usd: Decimal
     max_position_usd: Decimal
     max_concurrent_positions: int
     reserve_pct: Decimal
+
+    @model_validator(mode="after")
+    def _require_fields_for_mode(self) -> "SizingConfig":
+        if self.mode == "target_size_percentile":
+            if self.base_unit_usd is None or self.curve is None:
+                raise ConfigError("sizing.mode 'target_size_percentile' requires base_unit_usd and curve")
+        elif self.mode == "fixed_usd":
+            if self.fixed_usd is None:
+                raise ConfigError("sizing.mode 'fixed_usd' requires fixed_usd")
+        return self
 
 
 class VolatilityGuardConfig(BaseModel):

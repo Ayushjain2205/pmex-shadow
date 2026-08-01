@@ -26,6 +26,23 @@ profiles:
       max_position_usd: "75"
       max_concurrent_positions: 8
       reserve_pct: "20"
+  flat:
+    # Same guards as tight; sizing ignores the target's trade size entirely once
+    # it clears the noise filter below — every copied trade is the same $50,
+    # instead of scaling with how big the trade was relative to the target's own
+    # history. min_target_size_percentile still applies as an on/off noise gate
+    # (skip their small/routine trades), it just no longer feeds a multiplier.
+    max_slippage_ticks: 1
+    volatility_guard: { window_s: 5, max_ticks: 2 }
+    max_fill_age_s: 5
+    sizing:
+      mode: fixed_usd
+      fixed_usd: "50"
+      min_target_size_percentile: "60"
+      min_order_usd: "5"
+      max_position_usd: "50"
+      max_concurrent_positions: 8
+      reserve_pct: "20"
 
 risk:
   global_max_exposure_usd: "5000"

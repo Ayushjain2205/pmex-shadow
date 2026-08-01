@@ -193,6 +193,37 @@ def test_worked_example_reproduces_exactly():
     assert round(decision.size_multiplier, 1) == Decimal("2.0")
 
 
+def test_fixed_usd_mode_ignores_curve_multiplier():
+    """Same $10k-at-p88 fill as the worked example above, but sizing.mode=fixed_usd:
+    the percentile still gates (it clears min_target_size_percentile easily) and is
+    still recorded on the Intent, but the dollar amount is flat — no 2.0x multiplier
+    applied, size_multiplier reports 1 rather than the curve-derived value."""
+    policy = make_policy(sizing_overrides={
+        "mode": "fixed_usd", "fixed_usd": Decimal("50"), "base_unit_usd": None, "curve": None,
+    })
+    decision = run_decide(policy=policy)
+
+    assert isinstance(decision, Intent)
+    assert decision.side == Side.BUY
+    assert decision.shares == Decimal("79")  # floor($50 / $0.63 best ask)
+    assert decision.notional_usd == Decimal("49.77")
+    assert decision.size_multiplier == Decimal(1)
+    assert round(decision.target_percentile) == 88  # still computed/recorded, just unused for sizing
+
+
+def test_fixed_usd_mode_still_filters_noise_by_percentile():
+    """min_target_size_percentile is the noise filter in both modes — a fill below it
+    still gets skipped under fixed_usd, same as target_size_percentile."""
+    policy = make_policy(sizing_overrides={
+        "mode": "fixed_usd", "fixed_usd": Decimal("50"), "base_unit_usd": None, "curve": None,
+    })
+    # $500 against p50=$2000 lands well under the p60 gate.
+    decision = run_decide(policy=policy, fill=make_fill(notional_usd=Decimal("500")))
+
+    assert isinstance(decision, Skip)
+    assert decision.reason == "below_target_percentile"
+
+
 # --- Purity (FR-P-1) ---
 
 

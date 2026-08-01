@@ -128,8 +128,15 @@ def decide(
     if not vol_ok:
         return skip("volatility_guard", vol_detail)
 
-    mult = multiplier_for_percentile(percentile, policy.sizing.curve)
-    sized_usd = policy.sizing.base_unit_usd * mult
+    # target_percentile still feeds the noise filter above and is still recorded on
+    # the Intent either way (useful telemetry regardless of sizing mode) — only the
+    # dollar amount itself stops scaling with it under fixed_usd.
+    if policy.sizing.mode == "fixed_usd":
+        mult = Decimal(1)
+        sized_usd = policy.sizing.fixed_usd
+    else:
+        mult = multiplier_for_percentile(percentile, policy.sizing.curve)
+        sized_usd = policy.sizing.base_unit_usd * mult
 
     # Clamp cascade (FR-P-5): max_position_usd -> envelope -> global cap -> concurrent positions
     usd = min(sized_usd, policy.sizing.max_position_usd)

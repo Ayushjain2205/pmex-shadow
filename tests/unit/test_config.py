@@ -114,3 +114,110 @@ def test_load_policy_file(tmp_path):
     )
     policy = load_policy_file(path)
     assert policy.profiles["tight"].sizing.max_concurrent_positions == 8
+
+
+def test_fixed_usd_sizing_mode(tmp_path):
+    path = _write(
+        tmp_path,
+        "policy.yaml",
+        """
+        profiles:
+          flat:
+            max_slippage_ticks: 1
+            volatility_guard: { window_s: 5, max_ticks: 2 }
+            max_fill_age_s: 5
+            sizing:
+              mode: fixed_usd
+              fixed_usd: "50"
+              min_target_size_percentile: "60"
+              min_order_usd: "5"
+              max_position_usd: "50"
+              max_concurrent_positions: 8
+              reserve_pct: "20"
+        risk:
+          global_max_exposure_usd: "5000"
+          max_orders_per_minute: 30
+          halt_on_reconcile_drift_usd: "100"
+        targets:
+          decay: { window_days: 30, min_hit_rate: "0.45", auto_pause: true }
+          dormancy_days: 21
+        exits:
+          mirror_sells: true
+          auto_redeem: true
+          redeem_retry_days: 30
+        """,
+    )
+    policy = load_policy_file(path)
+    sizing = policy.profiles["flat"].sizing
+    assert sizing.mode == "fixed_usd"
+    assert sizing.fixed_usd == 50
+    assert sizing.base_unit_usd is None
+    assert sizing.curve is None
+
+
+def test_fixed_usd_mode_requires_fixed_usd(tmp_path):
+    path = _write(
+        tmp_path,
+        "policy.yaml",
+        """
+        profiles:
+          flat:
+            max_slippage_ticks: 1
+            volatility_guard: { window_s: 5, max_ticks: 2 }
+            max_fill_age_s: 5
+            sizing:
+              mode: fixed_usd
+              min_target_size_percentile: "60"
+              min_order_usd: "5"
+              max_position_usd: "50"
+              max_concurrent_positions: 8
+              reserve_pct: "20"
+        risk:
+          global_max_exposure_usd: "5000"
+          max_orders_per_minute: 30
+          halt_on_reconcile_drift_usd: "100"
+        targets:
+          decay: { window_days: 30, min_hit_rate: "0.45", auto_pause: true }
+          dormancy_days: 21
+        exits:
+          mirror_sells: true
+          auto_redeem: true
+          redeem_retry_days: 30
+        """,
+    )
+    with pytest.raises(Exception, match="fixed_usd"):
+        load_policy_file(path)
+
+
+def test_target_size_percentile_mode_requires_curve(tmp_path):
+    path = _write(
+        tmp_path,
+        "policy.yaml",
+        """
+        profiles:
+          tight:
+            max_slippage_ticks: 1
+            volatility_guard: { window_s: 5, max_ticks: 2 }
+            max_fill_age_s: 5
+            sizing:
+              base_unit_usd: "10"
+              min_target_size_percentile: "60"
+              min_order_usd: "5"
+              max_position_usd: "50"
+              max_concurrent_positions: 8
+              reserve_pct: "20"
+        risk:
+          global_max_exposure_usd: "5000"
+          max_orders_per_minute: 30
+          halt_on_reconcile_drift_usd: "100"
+        targets:
+          decay: { window_days: 30, min_hit_rate: "0.45", auto_pause: true }
+          dormancy_days: 21
+        exits:
+          mirror_sells: true
+          auto_redeem: true
+          redeem_retry_days: 30
+        """,
+    )
+    with pytest.raises(Exception, match="curve"):
+        load_policy_file(path)
