@@ -33,8 +33,8 @@ def test_crypto_market_exposes_underlying_asset():
     thing that separates them."""
     attrs = attrs_for("crypto_5m")
     assert attrs["asset"] == frozenset({"sol"})
-    assert attrs["duration"] == frozenset({"15m"})
-    assert attrs["series"] == frozenset({"sol-up-or-down-15m"})
+    assert attrs["duration"] == frozenset({"5m"})
+    assert attrs["series"] == frozenset({"sol-up-or-down-5m"})
 
 
 def test_weather_market_has_no_asset_but_still_resolves_identity():
@@ -60,7 +60,25 @@ def test_tags_are_slugs_not_labels():
     City") and slugs ("new-york-city") differ, and mixing them silently produces
     rules that never match."""
     attrs = attrs_for("weather_daily")
-    assert all(t == t.lower() and " " not in t for t in attrs["tag"])
+    assert all(" " not in t for t in attrs["tag"])
+
+
+@pytest.mark.parametrize("family", ["crypto_5m", "weather_daily"])
+def test_values_are_case_folded(family):
+    """Gamma's slugs are not consistently lowercase despite looking it — the live SOL
+    5m event tags itself "5M". Rule literals fold at parse time, so anything left
+    unfolded here is a rule that silently never fires. Caught in production, not by
+    the earlier version of this test, which asserted the property against a fixture
+    that happened to be all-lowercase."""
+    for key, values in attrs_for(family).items():
+        assert all(v == v.lower() for v in values), f"{family}.{key} not folded: {sorted(values)}"
+
+
+def test_the_uppercase_tag_that_exposed_this_is_still_in_the_fixture():
+    """Guards the guard: if a refresh of the fixture loses the mixed-case tag, the
+    test above starts passing vacuously and the regression can walk back in."""
+    raw = FIXTURE["crypto_5m"]["event"]["tags"]
+    assert any(t["slug"] != t["slug"].lower() for t in raw), "fixture no longer covers mixed-case slugs"
 
 
 def test_absent_attributes_are_omitted_not_empty():

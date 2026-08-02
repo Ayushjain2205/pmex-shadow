@@ -77,14 +77,23 @@ def market_attrs(market: dict, event: dict | None) -> dict[str, frozenset[str]]:
     guess, consistent with FR-M-3.
 
     Tag values are Gamma's `slug`s, not the `label`s `category` uses — slugs are
-    lowercase, stable, and what shows up in URLs ("new-york-city", not "New York
-    City"), so they're what a config author can actually predict.
+    stable and what shows up in URLs ("new-york-city", not "New York City"), so
+    they're what a config author can actually predict.
+
+    Everything is lowercased, because Gamma's slugs are not consistently lowercase
+    even though they look it: a live SOL 5m event carries tags ["5M", "crypto",
+    "solana", ...]. Rule literals are lowercased at parse time, so without matching
+    normalization here a config saying `tag: 5m` would silently never match a market
+    tagged "5M" — a deny rule that quietly stops denying, which is the exact failure
+    this whole mechanism is meant to rule out. `MarketMeta.category` keeps its
+    original casing; only the `category` match attribute is folded, since the legacy
+    `categories` selector still compares against the unfolded field.
     """
     attrs: dict[str, frozenset[str]] = {}
 
     slug = market.get("slug")
     if slug:
-        attrs["slug"] = frozenset({slug})
+        attrs["slug"] = frozenset({slug.lower()})
 
     # Crypto up/down markets carry their underlying and cadence structurally, which is
     # the only reliable way to tell BTC from SOL from XRP within one series family --
@@ -98,16 +107,16 @@ def market_attrs(market: dict, event: dict | None) -> dict[str, frozenset[str]]:
     if event is not None:
         if event.get("id"):
             attrs["event_id"] = frozenset({str(event["id"])})
-        series = {s["slug"] for s in (event.get("series") or []) if s.get("slug")}
+        series = {s["slug"].lower() for s in (event.get("series") or []) if s.get("slug")}
         if series:
             attrs["series"] = frozenset(series)
-        tags = {t["slug"] for t in (event.get("tags") or []) if t.get("slug")}
+        tags = {t["slug"].lower() for t in (event.get("tags") or []) if t.get("slug")}
         if tags:
             attrs["tag"] = frozenset(tags)
 
     category = _category_from_event(event)
     if category:
-        attrs["category"] = frozenset({category})
+        attrs["category"] = frozenset({category.lower()})
 
     return attrs
 
