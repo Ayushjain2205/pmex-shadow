@@ -55,11 +55,11 @@
       <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="time">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
       <td onclick="event.stopPropagation();">
         {% if b.halted %}
-        <form method="post" action="/bots/{{ b.bot_id }}/resume">
+        <form method="post" action="/bots/{{ b.bot_id }}/resume" class="bot-action-form" data-action="resume" data-bot="{{ b.bot_id }}">
           <button type="submit" style="background:#16a34a;" {{ "disabled" if not writes_enabled }}>▶ Resume</button>
         </form>
         {% else %}
-        <form method="post" action="/bots/{{ b.bot_id }}/halt">
+        <form method="post" action="/bots/{{ b.bot_id }}/halt" class="bot-action-form" data-action="stop" data-bot="{{ b.bot_id }}">
           <button type="submit" style="background:#dc2626;" {{ "disabled" if not writes_enabled }}>■ Stop</button>
         </form>
         {% endif %}
@@ -72,6 +72,26 @@
 <script>
   document.querySelectorAll("tr.row-link").forEach((row) => {
     row.addEventListener("click", () => { window.location.href = row.dataset.href; });
+  });
+
+  document.querySelectorAll("form.bot-action-form").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      const action = form.dataset.action;
+      const botId = form.dataset.bot;
+      const verb = action === "stop" ? "Stop" : "Resume";
+      const question = action === "stop"
+        ? `Stop bot "${botId}"? This halts its decision loop immediately (open orders are left resting).`
+        : `Resume bot "${botId}"? It will start making trading decisions again.`;
+      if (!window.confirm(question)) {
+        event.preventDefault();
+        return;
+      }
+      const button = form.querySelector("button[type=submit]");
+      if (button) {
+        button.disabled = true;
+        button.textContent = `${verb === "Stop" ? "Stopping" : "Resuming"}…`;
+      }
+    });
   });
 </script>
 {% endblock %}
