@@ -46,6 +46,8 @@ _SKIP_REASON_META: dict[str, tuple[str, str]] = {
     "slippage_guard": ("Price moved too far", "slippage"),
     "volatility_guard": ("Market too volatile", "chaos"),
     "selector_category": ("Category filtered", "filtered"),
+    "selector_deny": ("Excluded by deny rule", "filtered"),
+    "selector_allow": ("Outside allowlist", "filtered"),
     "selector_liquidity": ("Book too thin", "filtered"),
     "selector_notional": ("Target trade too small", "filtered"),
     "selector_resolution_window": ("Resolves too far out", "filtered"),
@@ -67,6 +69,24 @@ def _skip_label(reason: str) -> str:
 
 def _skip_category(reason: str) -> str:
     return _SKIP_REASON_META.get(reason, (reason, "filtered"))[1]
+
+
+def _rule_str(rule: dict[str, str]) -> str:
+    """A deny/allow rule as written: `asset=sol`, `tag=crypto-prices duration=5m`."""
+    return " ".join(f"{k}={v}" for k, v in rule.items())
+
+
+# Most-identifying first. A market carries a dozen tags and a slug nobody reads, but
+# one of these usually answers "which market is this" on its own.
+_IDENTITY_KEYS = ("asset", "series", "category", "tag", "slug")
+
+
+def _market_identity(attrs: dict[str, list[str]]) -> str:
+    for key in _IDENTITY_KEYS:
+        values = attrs.get(key)
+        if values:
+            return f"{key}={'|'.join(values[:3])}"
+    return "market with no identifying attributes"
 
 
 def _skip_summary(reason: str, detail: dict | None) -> str | None:
@@ -105,6 +125,16 @@ def _skip_summary(reason: str, detail: dict | None) -> str | None:
         return f"${detail['fill_notional_usd']:.2f} fill (need ${detail['min_required_usd']:.2f}+)"
     if reason == "selector_resolution_window":
         return f"{detail['resolution_days_out']}d out (limit {detail['max_allowed_days']}d)"
+    if reason == "selector_deny":
+        return _rule_str(detail["matched_rule"])
+    if reason == "selector_allow":
+        # The deny line can just name the rule that fired; this one can't, because
+        # nothing fired. The actual question behind an unexpected `selector_allow` is
+        # "what did the market look like, then" — so lead with its identity and let
+        # the rule count carry the rest.
+        rules = detail["allow_rules"]
+        plural = "rule" if len(rules) == 1 else "rules"
+        return f"{_market_identity(detail['market_attrs'])} matched none of {len(rules)} allow {plural}"
     if reason == "target_paused":
         return f"status: {detail['target_status']}"
     if reason in ("no_orderbook", "no_market_meta"):
