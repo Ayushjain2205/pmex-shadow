@@ -97,11 +97,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/targets")
     async def targets(request: Request, message: str | None = None, error: str | None = None):
         async with app.state.pool.acquire() as conn:
-            rows = await queries.targets_view(conn)
+            result = await queries.targets_view(conn)
             bot_ids = await queries.list_bot_ids(conn)
         return templates.TemplateResponse(
             request, "targets.html",
-            _ctx(request, targets=rows, bot_ids=bot_ids, active_nav="targets", message=message, error=error),
+            _ctx(request, bot_ids=bot_ids, active_nav="targets", message=message, error=error, **result),
         )
 
     @app.post("/targets")

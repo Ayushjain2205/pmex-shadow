@@ -3,15 +3,20 @@ PnL, reversal rate. Meant to run on a scheduled job (design doc §3.6), not the 
 path — `policy.sizing.percentile_of_value` (Phase 2) is what actually consumes the
 percentile columns this writes.
 
-hit_rate_30d / pnl_30d_usd are the target's *own* trading performance (not ours) —
-aggregated from the SDK's list_positions() for the target's wallet, the same
-Data-API-backed view reconcile.py uses for our own positions. There's no clean
-"closed within the last 30 days" filter on that endpoint, so this aggregates across
-all currently-visible positions as an approximation, documented rather than hidden.
+hit_rate_30d / pnl_30d_usd are the target's *own* trading performance (not ours),
+from the SDK's list_closed_positions() — realized_pnl on resolved trades, not
+list_positions()'s cash_pnl (an unrealized floating mark on still-*open* positions,
+which produced 0% hit rates and six-figure "losses" for every target here: an open
+position's floating mark isn't a win/loss signal, and list_positions() has no date
+filter at all, so every recompute pass was summing a high-frequency trader's entire
+position history as if it were 30 days). Sorted DESC by timestamp and paginated
+with an early stop the moment a page's positions age past the window — also fixes
+the unbounded pagination the old code did on every 15-minute recompute pass.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from decimal import Decimal
 
 import asyncpg
@@ -41,18 +46,26 @@ async def compute_size_percentiles(conn: asyncpg.Connection, target: str, since_
     }
 
 
-async def compute_hit_rate_and_pnl(target: str) -> tuple[Decimal | None, Decimal | None]:
+async def compute_hit_rate_and_pnl(target: str, since_days: int = 30) -> tuple[Decimal | None, Decimal | None]:
     client = AsyncPublicClient(environment=PRODUCTION)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=since_days)
     wins = 0
     total = 0
     pnl = Decimal(0)
-    async for page in client.list_positions(user=target, page_size=100):
+    async for page in client.list_closed_positions(user=target, sort_by="TIMESTAMP", sort_direction="DESC", page_size=50):
+        reached_cutoff = False
         for p in page.items:
+            if p.realized_pnl is None or p.timestamp is None:
+                continue
+            if p.timestamp < cutoff:
+                reached_cutoff = True
+                break
             total += 1
-            cash_pnl = Decimal(str(p.cash_pnl))
-            pnl += cash_pnl
-            if cash_pnl > 0:
+            pnl += p.realized_pnl
+            if p.realized_pnl > 0:
                 wins += 1
+        if reached_cutoff:
+            break
     if total == 0:
         return None, None
     return Decimal(wins) / Decimal(total), pnl

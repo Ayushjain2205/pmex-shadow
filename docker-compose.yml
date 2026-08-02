@@ -62,5 +62,27 @@ services:
     command: ["backup", "--schedule", "0 */6 * * *"]
     restart: unless-stopped
 
+  # target_stats (size percentiles, hit rate, PnL, reversal rate, decay/dormancy
+  # auto-pause) has no other writer — targets/stats.py's own docstring says this is
+  # "meant to run on a scheduled job," but nothing ever actually ran it: found via
+  # every column on the Targets page being permanently blank despite thousands of
+  # ingested fills, which in turn meant policy/sizing.py's percentile_of_value() was
+  # reading size_p50..p95 as 0 for every target — every fill landed above all four
+  # (zero) breakpoints, so real trades were being sized at the curve's max
+  # multiplier unconditionally, not scaled by actual conviction. 15 minutes: frequent
+  # enough that sizing percentiles track live trading activity on these targets'
+  # mostly-15-minute markets, infrequent enough not to hammer the public positions
+  # API compute_hit_rate_and_pnl() calls per target.
+  targets-recompute:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    volumes:
+      - ./policy.yaml:/app/policy.yaml:ro
+    command: ["targets", "recompute", "--schedule", "*/15 * * * *"]
+    restart: unless-stopped
+
 volumes:
   pgdata:

@@ -330,11 +330,17 @@ async def list_bot_ids(conn: asyncpg.Connection) -> list[str]:
     return [r["bot_id"] for r in rows]
 
 
-async def targets_view(conn: asyncpg.Connection) -> list[dict]:
-    return await conn.fetch(
+STATS_STALE_AFTER = dt.timedelta(minutes=30)  # targets-recompute runs every 15 minutes; 2x that before flagging
+
+
+async def targets_view(conn: asyncpg.Connection) -> dict:
+    rows = await conn.fetch(
         "SELECT target, alias, status, size_p50, size_p80, size_p95, fills_30d, "
-        "hit_rate_30d, pnl_30d_usd, reversal_rate, last_fill_at FROM target_stats ORDER BY target"
+        "hit_rate_30d, pnl_30d_usd, reversal_rate, last_fill_at, computed_at FROM target_stats ORDER BY target"
     )
+    stalest_computed_at = min((r["computed_at"] for r in rows), default=None)
+    stats_stale = stalest_computed_at is not None and dt.datetime.now(dt.timezone.utc) - stalest_computed_at > STATS_STALE_AFTER
+    return {"targets": rows, "stalest_computed_at": stalest_computed_at, "stats_stale": stats_stale}
 
 
 async def logs_view(
