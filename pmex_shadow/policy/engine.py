@@ -63,26 +63,18 @@ def decide(
     if not fresh:
         return skip("stale_fill", staleness_detail)
 
-    # --- Selectors (FR-P-2): AND, absent = no constraint ---
-    sel = bot.selectors
-    if sel.categories is not None:
-        if market.category is None:
-            return skip("unknown_category")  # FR-M-3: fail closed, never guess
-        if market.category not in sel.categories:
-            return skip("selector_category", {"market_category": market.category, "allowed_categories": sel.categories})
-    if sel.min_book_liquidity_usd is not None:
-        liquidity = sum((p * s for p, s in book.bids), Decimal(0)) + sum((p * s for p, s in book.asks), Decimal(0))
-        if liquidity < sel.min_book_liquidity_usd:
-            return skip("selector_liquidity", {"book_liquidity_usd": float(liquidity), "min_required_usd": float(sel.min_book_liquidity_usd)})
-    if sel.min_target_notional_usd is not None and fill.notional_usd < sel.min_target_notional_usd:
-        return skip("selector_notional", {"fill_notional_usd": float(fill.notional_usd), "min_required_usd": float(sel.min_target_notional_usd)})
-    if sel.max_time_to_resolution_days is not None:
-        if market.resolution_days_out is None or market.resolution_days_out > sel.max_time_to_resolution_days:
-            return skip("selector_resolution_window", {"resolution_days_out": market.resolution_days_out, "max_allowed_days": sel.max_time_to_resolution_days})
+    # Executability applies to both directions — an untradeable market can't be exited
+    # any more than it can be entered.
     if not market.tradeable:
         return skip("market_not_tradeable")
 
     # --- Exit path (FR-P-11): proportional to OUR position, never their absolute size ---
+    #
+    # Selectors deliberately do NOT run here. They answer "do we want to be in this
+    # market," which is only a question on the way in: applying them to a SELL means
+    # that narrowing a bot's scope silently strands whatever it already holds outside
+    # the new scope, with no way to mirror the target out of it. The position exists
+    # regardless of whether we'd open it again today, so the exit has to stay reachable.
     if fill.side == Side.SELL:
         our_position = ledger.position_for(fill.token_id)
         shares = exit_shares(fill, target, our_position)
@@ -110,6 +102,23 @@ def decide(
             target_percentile=Decimal(0),  # sizing curve doesn't apply to exits
             size_multiplier=Decimal(1),
         )
+
+    # --- Selectors (FR-P-2): AND, absent = no constraint. Entry-only, see above. ---
+    sel = bot.selectors
+    if sel.categories is not None:
+        if market.category is None:
+            return skip("unknown_category")  # FR-M-3: fail closed, never guess
+        if market.category not in sel.categories:
+            return skip("selector_category", {"market_category": market.category, "allowed_categories": sel.categories})
+    if sel.min_book_liquidity_usd is not None:
+        liquidity = sum((p * s for p, s in book.bids), Decimal(0)) + sum((p * s for p, s in book.asks), Decimal(0))
+        if liquidity < sel.min_book_liquidity_usd:
+            return skip("selector_liquidity", {"book_liquidity_usd": float(liquidity), "min_required_usd": float(sel.min_book_liquidity_usd)})
+    if sel.min_target_notional_usd is not None and fill.notional_usd < sel.min_target_notional_usd:
+        return skip("selector_notional", {"fill_notional_usd": float(fill.notional_usd), "min_required_usd": float(sel.min_target_notional_usd)})
+    if sel.max_time_to_resolution_days is not None:
+        if market.resolution_days_out is None or market.resolution_days_out > sel.max_time_to_resolution_days:
+            return skip("selector_resolution_window", {"resolution_days_out": market.resolution_days_out, "max_allowed_days": sel.max_time_to_resolution_days})
 
     # --- Entry path (FR-P-3, FR-P-4, FR-P-6) ---
     percentile = percentile_of_value(fill.notional_usd, target)

@@ -287,6 +287,42 @@ def test_selector_category_passes_when_matching():
     assert isinstance(d, Intent)
 
 
+def test_selectors_do_not_block_exits():
+    """Narrowing a bot's scope must never strand what it already holds. A SELL in a
+    market the selectors now exclude still mirrors out — otherwise the only way to
+    close the position is to widen the selectors back out, which reopens the bot to
+    entries in exactly the market it was just told to avoid."""
+    our_position = Position(token_id="tok1", shares=Decimal("79"), cost_basis_usd=Decimal("49.77"))
+    ledger = make_ledger(positions=make_ledger().positions + (our_position,))
+    sell_fill = make_fill(side=Side.SELL, price=Decimal("0.65"), notional_usd=Decimal("260"), size=Decimal("400"))
+    bot = make_bot(selectors=SelectorsConfig(categories=["sports"]))
+
+    decision = run_decide(
+        fill=sell_fill, bot=bot, ledger=ledger,
+        market=make_market(category="politics"),  # excluded by the selector above
+        target=make_target(position_before=Decimal("1000")),
+        book=make_book(bids=[(Decimal("0.64"), Decimal("100000"))]),
+    )
+
+    assert isinstance(decision, Intent)
+    assert decision.side == Side.SELL
+    assert decision.shares == Decimal("31")
+
+
+def test_untradeable_market_blocks_exits_too():
+    """Unlike the selectors above, tradeability is not a preference — there is no
+    order to place either way, so it still short-circuits a SELL."""
+    our_position = Position(token_id="tok1", shares=Decimal("79"), cost_basis_usd=Decimal("49.77"))
+    ledger = make_ledger(positions=make_ledger().positions + (our_position,))
+    sell_fill = make_fill(side=Side.SELL, price=Decimal("0.65"), notional_usd=Decimal("260"), size=Decimal("400"))
+
+    d = run_decide(
+        fill=sell_fill, ledger=ledger, market=make_market(tradeable=False),
+        target=make_target(position_before=Decimal("1000")),
+    )
+    assert isinstance(d, Skip) and d.reason == "market_not_tradeable"
+
+
 def test_skip_selector_liquidity():
     bot = make_bot(selectors=SelectorsConfig(min_book_liquidity_usd=Decimal("100000")))
     thin_book = make_book(bids=[(Decimal("0.61"), Decimal("1"))], asks=[(Decimal("0.63"), Decimal("1"))])
