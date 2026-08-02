@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pmex_shadow.config import ConfigError, load_bot_config, load_policy_file
+from pmex_shadow.config import ConfigError, SelectorsConfig, load_bot_config, load_policy_file
 
 
 def _write(tmp_path: Path, name: str, content: str) -> Path:
@@ -221,3 +221,18 @@ def test_target_size_percentile_mode_requires_curve(tmp_path):
     )
     with pytest.raises(Exception, match="curve"):
         load_policy_file(path)
+
+
+def test_null_event_ids_still_loads():
+    """Active bot_config rows serialize event_ids explicitly as null. If those stop
+    validating, consumer.py's hot-reload logs and keeps the *previous* config, so a
+    bot silently stops honouring dashboard edits — a much quieter failure than a
+    crash. Accepting null is what keeps that from happening."""
+    assert SelectorsConfig.model_validate({"event_ids": None}).event_ids is None
+
+
+def test_setting_event_ids_is_a_load_error():
+    """It never filtered anything. Leaving it merely ignored would preserve the
+    original bug — believing you'd scoped a bot when you hadn't."""
+    with pytest.raises(Exception, match="never been implemented"):
+        SelectorsConfig.model_validate({"event_ids": ["788072"]})

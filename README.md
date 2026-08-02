@@ -232,7 +232,43 @@ Two things that will bite you if you hand-edit this file:
 
 Optional `selectors` narrow what the bot copies — `categories`,
 `min_book_liquidity_usd`, `min_target_notional_usd`, `max_time_to_resolution_days`,
-`event_ids`. They compose with AND, and an absent selector is no constraint (FR-P-2).
+plus the `deny`/`allow` rules below. They compose with AND, and an absent selector is
+no constraint (FR-P-2).
+
+`deny` and `allow` filter on *market identity*, which is what you need when a target
+trades several markets you don't want equally. A wallet running BTC, SOL and XRP
+5-minute markets can't be split by `categories` (all three share one) or by event id
+(each recurrence mints a new one), so rules match a bag of resolved attributes
+instead — `asset`, `duration`, `series`, `tag`, `event_id`, `slug`, `category`:
+
+```yaml
+selectors:
+  deny:
+    - asset: sol                      # copy their BTC and XRP, skip SOL
+  allow:
+    - {tag: crypto-prices, duration: 5m}
+```
+
+Keys within one rule are ANDed, values within a key ORed, and several rules ORed.
+Deny wins over allow. A rule can only match a market that *has* the attribute, which
+gives the two the right asymmetry across market families: `{asset: sol}` is inert
+against a weather market (no `asset` to match) as a deny, but excludes it as an
+allow, since an allowlist should only admit what it can positively identify.
+
+Prefer exact values over patterns. A deny rule that stops matching — because a slug
+was renamed — fails open: you silently resume copying what you meant to exclude. For
+families with no structured key there's `slug: {re: '...'}`, compiled at load and
+matched with `fullmatch`, so `sol` will not match `solana-...`.
+
+Rule attributes are validated at load, so a typo is a startup error rather than a
+filter that quietly never fires. `event_ids` is **not implemented** and never was —
+setting it is now a load error pointing at `allow: [{event_id: ...}]`.
+
+One cross-family trap: `max_slippage_ticks` and `volatility_guard.max_ticks` are in
+*ticks*, and tick size varies by family — 0.01 on crypto up/down markets, 0.001 on
+daily weather. The `tight` profile is 10x stricter on weather than on crypto and will
+skip almost everything on `slippage_guard`, which reads as a broken filter but isn't.
+Use a separate profile per family.
 
 Then run it:
 

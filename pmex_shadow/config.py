@@ -129,6 +129,15 @@ class SelectorsConfig(BaseModel):
     min_book_liquidity_usd: Decimal | None = None
     min_target_notional_usd: Decimal | None = None
     max_time_to_resolution_days: int | None = None
+
+    # Never implemented — decide() has never read this, so any bot that set it got no
+    # filtering and no indication of that. Retained (rather than deleted) only because
+    # active bot_config rows serialize it explicitly as null, and dropping the field
+    # would make those rows fail validation: consumer.py's hot-reload catches that,
+    # logs, and silently keeps the previous config, so a bot would quietly stop
+    # honouring dashboard edits. Accepting null keeps them loading; rejecting a real
+    # value keeps the original fail-open bug from outliving the field. Delete outright
+    # once no stored config carries the key.
     event_ids: list[str] | None = None
 
     # Identity rules over MarketMeta.attrs, evaluated deny-then-allow. These exist
@@ -137,6 +146,17 @@ class SelectorsConfig(BaseModel):
     # event every recurrence). See policy/match.py for the deny/allow asymmetry.
     deny: list[MatchRule] | None = None
     allow: list[MatchRule] | None = None
+
+    @model_validator(mode="after")
+    def _reject_nonfunctional_event_ids(self) -> "SelectorsConfig":
+        if self.event_ids:
+            raise ConfigError(
+                "selectors.event_ids has never been implemented and silently filtered "
+                "nothing — use `allow: [{event_id: [...]}]` instead. Note an event id "
+                "identifies one recurrence, so for a repeating series you almost "
+                "certainly want `series` or `asset` rather than either."
+            )
+        return self
 
 
 class PolicyRef(BaseModel):
