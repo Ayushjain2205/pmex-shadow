@@ -151,16 +151,12 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
             "SELECT COALESCE(sum(realized_pnl_usd), 0) AS pnl FROM positions WHERE bot_id = $1 AND last_event_at >= date_trunc('day', now())",
             bot_id,
         )
-        counts = await conn.fetchrow(
-            "SELECT count(*) FILTER (WHERE decision = 'COPY') AS copies, count(*) FILTER (WHERE decision = 'SKIP') AS skips "
-            "FROM intents WHERE bot_id = $1 AND created_at >= now() - interval '24 hours'",
-            bot_id,
+        total_pnl = await conn.fetchrow(
+            "SELECT COALESCE(sum(realized_pnl_usd), 0) AS pnl FROM positions WHERE bot_id = $1", bot_id,
         )
         last_fill = await conn.fetchrow(
             "SELECT max(created_at) AS at FROM intents WHERE bot_id = $1", bot_id,
         )
-        total = (counts["copies"] or 0) + (counts["skips"] or 0)
-        skip_rate = (counts["skips"] / total) if total > 0 else None
 
         heartbeat_at = heartbeat["at"] if heartbeat else None
         is_stale = heartbeat_at is None or dt.datetime.now(dt.timezone.utc) - heartbeat_at > BOT_HEARTBEAT_STALE_AFTER
@@ -192,7 +188,7 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
             "envelope_usd": config.get("risk", {}).get("envelope_usd"),
             "deployed_usd": deployed["deployed"],
             "today_pnl_usd": today_pnl["pnl"],
-            "skip_rate_24h": skip_rate,
+            "total_pnl_usd": total_pnl["pnl"],
             "halted": halted,
             "halt_reason": halt_reason,
             "last_fill_at": last_fill["at"],

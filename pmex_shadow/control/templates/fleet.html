@@ -31,7 +31,7 @@
 
 <table>
   <thead>
-    <tr><th>Bot</th><th>Mode</th><th>Status</th><th>Envelope</th><th>Deployed</th><th>Today's PnL</th><th>Skip rate (24h)</th><th>Last fill</th><th>Heartbeat</th><th>Actions</th></tr>
+    <tr><th>Bot</th><th>Mode</th><th>Status</th><th>Envelope</th><th>Deployed</th><th>Today's PnL</th><th>Total PnL</th><th>Last fill</th><th>Heartbeat</th><th>Actions</th></tr>
   </thead>
   <tbody>
     {% for b in bots %}
@@ -50,7 +50,7 @@
       <td>${{ "%.2f"|format(b.envelope_usd|float) if b.envelope_usd else "—" }}</td>
       <td>${{ "%.2f"|format(b.deployed_usd) }}</td>
       <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#4ade80' if b.today_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(b.today_pnl_usd) }}</td>
-      <td>{{ "%.0f%%"|format(b.skip_rate_24h * 100) if b.skip_rate_24h is not none else "—" }}</td>
+      <td style="color: {{ 'inherit' if b.total_pnl_usd == 0 else ('#4ade80' if b.total_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(b.total_pnl_usd) }}</td>
       <td>{% if b.last_fill_at %}<span data-utc="{{ b.last_fill_at.isoformat() }}">{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
       <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="time">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
       <td onclick="event.stopPropagation();">
