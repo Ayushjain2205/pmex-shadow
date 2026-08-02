@@ -5,22 +5,51 @@
 {% if not bots %}
 <p>No bots configured yet. Run <code>pmex-shadow bot new &lt;name&gt;</code> and start it with <code>pmex-shadow bot run &lt;name&gt;</code>.</p>
 {% else %}
+<div class="card">
+  <div class="stat-row">
+    <div class="stat">
+      <div class="label">Bots</div>
+      <div class="value">{{ summary.count }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Active</div>
+      <div class="value" style="color: {{ '#16a34a' if summary.active_count == summary.count else 'inherit' }}">{{ summary.active_count }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Stale heartbeat</div>
+      <div class="value" style="color: {{ '#dc2626' if summary.stale_count > 0 else 'inherit' }}">{{ summary.stale_count }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Live / Paper / Watch</div>
+      <div class="value">{{ summary.live_count }} / {{ summary.paper_count }} / {{ summary.watch_count }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Today's P&amp;L (fleet)</div>
+      <div class="value" style="color: {{ 'inherit' if summary.total_today_pnl_usd == 0 else ('#16a34a' if summary.total_today_pnl_usd > 0 else '#dc2626') }}">{{ "%+.2f"|format(summary.total_today_pnl_usd) }}</div>
+    </div>
+  </div>
+</div>
+
 <table>
   <thead>
-    <tr><th>Bot</th><th>Mode</th><th>Envelope</th><th>Deployed</th><th>Today's PnL</th><th>Skip rate (24h)</th><th>Last fill</th><th>Heartbeat</th><th></th></tr>
+    <tr><th>Bot</th><th>Status</th><th>Mode</th><th>Envelope</th><th>Deployed</th><th>Today's PnL</th><th>Skip rate (24h)</th><th>Last fill</th><th>Heartbeat</th><th></th></tr>
   </thead>
   <tbody>
     {% for b in bots %}
     <tr>
       <td><strong>{{ b.bot_id }}</strong></td>
+      <td>
+        {% if b.is_stale %}<span class="pill pill-stale">stale</span>
+        {% else %}<span class="pill pill-active">active</span>{% endif %}
+      </td>
       <td><span class="pill pill-{{ b.mode }}">{{ b.mode }}</span></td>
       <td>${{ "%.2f"|format(b.envelope_usd|float) if b.envelope_usd else "—" }}</td>
       <td>${{ "%.2f"|format(b.deployed_usd) }}</td>
-      <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#16a34a' if b.today_pnl_usd > 0 else '#dc2626') }}">${{ "%.2f"|format(b.today_pnl_usd) }}</td>
+      <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#16a34a' if b.today_pnl_usd > 0 else '#dc2626') }}">{{ "%+.2f"|format(b.today_pnl_usd) }}</td>
       <td>{{ "%.0f%%"|format(b.skip_rate_24h * 100) if b.skip_rate_24h is not none else "—" }}</td>
       <td>{% if b.last_fill_at %}<span data-utc="{{ b.last_fill_at.isoformat() }}">{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
       <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="time">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
-      <td><a href="/bots/{{ b.bot_id }}">view →</a></td>
+      <td style="white-space:nowrap;"><a href="/bots/{{ b.bot_id }}">view →</a></td>
     </tr>
     {% endfor %}
   </tbody>

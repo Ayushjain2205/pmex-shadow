@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+from decimal import Decimal
 
 import asyncpg
 import httpx
@@ -122,7 +123,10 @@ def _context_summary(context: dict | None) -> str | None:
     return " · ".join(f"{k}: {v}" for k, v in context.items())
 
 
-async def fleet_view(conn: asyncpg.Connection) -> list[dict]:
+BOT_HEARTBEAT_STALE_AFTER = dt.timedelta(seconds=60)  # bots write one every 5s (watcher/heartbeat.py); 60s is generous
+
+
+async def fleet_view(conn: asyncpg.Connection) -> dict:
     """Per bot: mode, watcher-relative lag, exposure vs envelope, today's PnL, skip
     rate, last fill — the fleet-view screen (design doc §3.8)."""
     bots = await conn.fetch(
@@ -158,6 +162,9 @@ async def fleet_view(conn: asyncpg.Connection) -> list[dict]:
         total = (counts["copies"] or 0) + (counts["skips"] or 0)
         skip_rate = (counts["skips"] / total) if total > 0 else None
 
+        heartbeat_at = heartbeat["at"] if heartbeat else None
+        is_stale = heartbeat_at is None or dt.datetime.now(dt.timezone.utc) - heartbeat_at > BOT_HEARTBEAT_STALE_AFTER
+
         rows.append({
             "bot_id": bot_id,
             "mode": config.get("mode"),
@@ -167,9 +174,20 @@ async def fleet_view(conn: asyncpg.Connection) -> list[dict]:
             "today_pnl_usd": today_pnl["pnl"],
             "skip_rate_24h": skip_rate,
             "last_fill_at": last_fill["at"],
-            "heartbeat_at": heartbeat["at"] if heartbeat else None,
+            "heartbeat_at": heartbeat_at,
+            "is_stale": is_stale,
         })
-    return rows
+
+    summary = {
+        "count": len(rows),
+        "active_count": sum(1 for r in rows if not r["is_stale"]),
+        "stale_count": sum(1 for r in rows if r["is_stale"]),
+        "live_count": sum(1 for r in rows if r["mode"] == "live"),
+        "paper_count": sum(1 for r in rows if r["mode"] == "paper"),
+        "watch_count": sum(1 for r in rows if r["mode"] == "watch"),
+        "total_today_pnl_usd": sum((r["today_pnl_usd"] for r in rows), Decimal(0)),
+    }
+    return {"bots": rows, "summary": summary}
 
 
 async def _fetch_market_question(client: httpx.AsyncClient, gamma_api_base_url: str, token_id: str) -> str | None:

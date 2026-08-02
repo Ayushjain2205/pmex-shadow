@@ -77,8 +77,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/")
     async def fleet(request: Request):
         async with app.state.pool.acquire() as conn:
-            bots = await queries.fleet_view(conn)
-        return templates.TemplateResponse(request, "fleet.html", _ctx(request, bots=bots, active_nav="fleet"))
+            result = await queries.fleet_view(conn)
+        return templates.TemplateResponse(request, "fleet.html", _ctx(request, active_nav="fleet", **result))
 
     @app.get("/bots/{bot_id}")
     async def bot_detail(request: Request, bot_id: str, pos_page: int = 1, dec_page: int = 1, log_page: int = 1):
