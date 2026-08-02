@@ -437,3 +437,153 @@ async def logs_view(
         "all_components": all_components, "all_levels": all_levels,
         "component": component, "level": level, "bot_id": bot_id,
     }
+
+
+# Histogram buckets for total copy-trade latency (chain-sourced fills only — see
+# latency_view). Edges as (lo, hi, label); hi=None means "and up".
+_LATENCY_BUCKETS: list[tuple[float, float | None, str]] = [
+    (0, 0.5, "<0.5s"), (0.5, 1, "0.5–1s"), (1, 1.5, "1–1.5s"), (1.5, 2, "1.5–2s"),
+    (2, 2.5, "2–2.5s"), (2.5, 3, "2.5–3s"), (3, 4, "3–4s"), (4, 5, "4–5s"),
+    (5, 10, "5–10s"), (10, None, ">10s"),
+]
+
+# Shared by every latency_view query — one CTE per stage boundary (PRD §5 tables:
+# target_fills.block_ts/detected_at, intents.created_at, orders.created_at,
+# order_transitions.at) rather than a single denormalized view, since order state
+# is itself an event log (multiple transitions per order), not a column.
+_LATENCY_CTE = """
+    WITH sub AS (
+        SELECT order_id, MIN(at) AS submitted_at FROM order_transitions WHERE to_state = 'submitted' GROUP BY order_id
+    ),
+    term AS (
+        SELECT order_id, MIN(at) AS terminal_at, MIN(to_state) AS terminal_state
+        FROM order_transitions WHERE to_state IN ('filled','partial','rejected','cancelled','expired')
+        GROUP BY order_id
+    ),
+    copy_orders AS (
+        SELECT
+            f.id AS fill_id, f.target, f.token_id, f.side, f.source, f.block_ts, f.detected_at,
+            i.created_at AS intent_at, o.id AS order_id, o.created_at AS order_built_at,
+            sub.submitted_at, term.terminal_at, term.terminal_state,
+            EXTRACT(EPOCH FROM (f.detected_at - f.block_ts)) AS detect_lat,
+            EXTRACT(EPOCH FROM (i.created_at - f.detected_at)) AS decision_lat,
+            EXTRACT(EPOCH FROM (o.created_at - i.created_at)) AS build_lat,
+            EXTRACT(EPOCH FROM (sub.submitted_at - o.created_at)) AS submit_lat,
+            EXTRACT(EPOCH FROM (term.terminal_at - sub.submitted_at)) AS ack_lat,
+            EXTRACT(EPOCH FROM (term.terminal_at - f.block_ts)) AS total_lat,
+            EXTRACT(EPOCH FROM (term.terminal_at - f.detected_at)) AS our_side_lat
+        FROM target_fills f
+        JOIN intents i ON i.fill_id = f.id AND i.decision = 'COPY'
+        JOIN orders o ON o.intent_id = i.id
+        LEFT JOIN sub ON sub.order_id = o.id
+        LEFT JOIN term ON term.order_id = o.id
+    )
+"""
+
+
+async def latency_view(conn: asyncpg.Connection) -> dict:
+    """Copy-trade latency: on-chain fill -> our order reaching a terminal state,
+    across every COPY decision that produced an order (FR-C-2 analysis screen).
+
+    `chain`-sourced fills have a watcher-observed block_ts trustworthy enough to
+    anchor a latency measurement. `dataapi`-sourced ones don't — that source's
+    reported block_ts occasionally lands *after* our own detected_at (an indexing
+    artifact of polling a REST backfill, not real negative latency) — so they're
+    reported separately, measured from our own detection instead of the chain
+    timestamp, rather than blended into headline numbers that would then include
+    fabricated negative latencies.
+    """
+    totals = await conn.fetchrow(_LATENCY_CTE + """
+        SELECT
+            count(*) AS n_total,
+            count(*) FILTER (WHERE source = 'chain') AS n_chain,
+            count(*) FILTER (WHERE source = 'dataapi') AS n_dataapi
+        FROM copy_orders
+    """)
+
+    stage = await conn.fetchrow(_LATENCY_CTE + """
+        SELECT
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY detect_lat) AS detect_p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY detect_lat) AS detect_p90,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY decision_lat) AS decision_p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY decision_lat) AS decision_p90,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY build_lat) AS build_p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY build_lat) AS build_p90,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY submit_lat) AS submit_p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY submit_lat) AS submit_p90,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY ack_lat) AS ack_p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY ack_lat) AS ack_p90,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY total_lat) AS total_p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY total_lat) AS total_p90,
+            percentile_cont(0.99) WITHIN GROUP (ORDER BY total_lat) AS total_p99,
+            max(total_lat) AS total_max,
+            avg(total_lat) AS total_mean,
+            100.0 * count(*) FILTER (WHERE total_lat <= 4) / NULLIF(count(*), 0) AS pct_within_4s
+        FROM copy_orders WHERE source = 'chain'
+    """)
+
+    dataapi = await conn.fetchrow(_LATENCY_CTE + """
+        SELECT
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY our_side_lat) AS p50,
+            percentile_cont(0.9) WITHIN GROUP (ORDER BY our_side_lat) AS p90
+        FROM copy_orders WHERE source = 'dataapi'
+    """)
+
+    outcome_rows = await conn.fetch(_LATENCY_CTE + """
+        SELECT terminal_state, count(*) AS n FROM copy_orders WHERE terminal_state IS NOT NULL GROUP BY terminal_state
+    """)
+    outcome_n = {r["terminal_state"]: r["n"] for r in outcome_rows}
+    outcome_total = sum(outcome_n.values()) or 1
+    outcomes = {
+        state: {"n": outcome_n.get(state, 0), "pct": round(100 * outcome_n.get(state, 0) / outcome_total)}
+        for state in ("filled", "partial", "rejected")
+    }
+
+    bucket_case = " ".join(
+        (f"WHEN total_lat >= {lo} AND total_lat < {hi} THEN '{label}'" if hi is not None
+         else f"WHEN total_lat >= {lo} THEN '{label}'")
+        for lo, hi, label in _LATENCY_BUCKETS
+    )
+    hist_rows = await conn.fetch(_LATENCY_CTE + f"""
+        SELECT CASE {bucket_case} END AS bucket, count(*) AS n
+        FROM copy_orders WHERE source = 'chain' AND total_lat IS NOT NULL
+        GROUP BY bucket
+    """)
+    hist_n = {r["bucket"]: r["n"] for r in hist_rows}
+    histogram = [{"label": label, "n": hist_n.get(label, 0)} for _, _, label in _LATENCY_BUCKETS]
+    max_bucket = max((h["n"] for h in histogram), default=0)
+    for h in histogram:
+        h["pct"] = round(100 * h["n"] / max_bucket) if max_bucket else 0
+
+    slowest = await conn.fetch(_LATENCY_CTE + """
+        SELECT co.fill_id, co.target, ts.alias, co.side, co.block_ts, co.total_lat, co.detect_lat, co.terminal_state
+        FROM copy_orders co
+        LEFT JOIN target_stats ts ON ts.target = co.target
+        WHERE co.source = 'chain' AND co.total_lat IS NOT NULL
+        ORDER BY co.total_lat DESC LIMIT 10
+    """)
+
+    stage_d = dict(stage) if stage else {}
+    total_p50 = float(stage_d.get("total_p50") or 0)
+    funnel = [
+        {"key": "detect", "label": "On-chain → watcher detects", "p50": stage_d.get("detect_p50"), "p90": stage_d.get("detect_p90")},
+        {"key": "decision", "label": "Detected → policy decision", "p50": stage_d.get("decision_p50"), "p90": stage_d.get("decision_p90")},
+        {"key": "build", "label": "Decision → order built", "p50": stage_d.get("build_p50"), "p90": stage_d.get("build_p90")},
+        {"key": "submit", "label": "Order built → submitted", "p50": stage_d.get("submit_p50"), "p90": stage_d.get("submit_p90")},
+        {"key": "ack", "label": "Submitted → terminal state", "p50": stage_d.get("ack_p50"), "p90": stage_d.get("ack_p90")},
+    ]
+    for stg in funnel:
+        p50 = float(stg["p50"] or 0)
+        stg["pct"] = min(100, round(100 * p50 / total_p50)) if total_p50 else 0
+
+    return {
+        "n_total": totals["n_total"],
+        "n_chain": totals["n_chain"],
+        "n_dataapi": totals["n_dataapi"],
+        "stage": stage_d,
+        "funnel": funnel,
+        "dataapi": dict(dataapi) if dataapi else {},
+        "outcomes": outcomes,
+        "histogram": histogram,
+        "slowest": [dict(r) for r in slowest],
+    }

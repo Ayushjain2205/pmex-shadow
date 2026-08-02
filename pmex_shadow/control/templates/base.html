@@ -43,7 +43,7 @@
     tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
     .pill { display: inline-block; padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
     .pill-active, .pill-filled, .pill-applied, .pill-resolved, .pill-redeemed { background: color-mix(in srgb, #22c55e 30%, transparent); color: #4ade80; }
-    .pill-pending_resolution, .pill-built, .pill-submitted, .pill-acked { background: color-mix(in srgb, #eab308 30%, transparent); color: #fbbf24; }
+    .pill-pending_resolution, .pill-built, .pill-submitted, .pill-acked, .pill-partial { background: color-mix(in srgb, #eab308 30%, transparent); color: #fbbf24; }
     .pill-paused_decay, .pill-paused_dormant, .pill-paused_manual, .pill-rejected, .pill-CRITICAL, .pill-rejected_order, .pill-written_off, .pill-disputed { background: color-mix(in srgb, #ef4444 30%, transparent); color: #f87171; }
     .pill-WARN { background: color-mix(in srgb, #f97316 30%, transparent); color: #fb923c; }
     .pill-INFO { background: color-mix(in srgb, #64748b 28%, transparent); color: #94a3b8; }
@@ -107,6 +107,7 @@
     <span class="brand">pmex-shadow</span>
     <a href="/" class="{% if active_nav == 'fleet' %}active{% endif %}">Fleet</a>
     <a href="/targets" class="{% if active_nav == 'targets' %}active{% endif %}">Targets</a>
+    <a href="/analysis" class="{% if active_nav == 'analysis' %}active{% endif %}">Analysis</a>
     <a href="/logs" class="{% if active_nav == 'logs' %}active{% endif %}">Logs</a>
   </nav>
   <main>

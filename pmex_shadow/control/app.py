@@ -171,6 +171,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return RedirectResponse(f"/targets?message={quote(message)}", status_code=303)
 
+    @app.get("/analysis")
+    async def analysis(request: Request):
+        async with app.state.pool.acquire() as conn:
+            result = await queries.latency_view(conn)
+        return templates.TemplateResponse(request, "analysis.html", _ctx(request, active_nav="analysis", **result))
+
     @app.get("/logs")
     async def logs(request: Request, bot_id: str | None = None, component: str | None = None, level: str | None = None, page: int = 1):
         async with app.state.pool.acquire() as conn:

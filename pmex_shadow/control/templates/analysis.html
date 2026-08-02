@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Analysis — pmex-shadow{% endblock %}
+{% block content %}
+<h1>Copy-trade latency</h1>
+<div class="subtitle">On-chain fill → our order reaching a terminal state, across every COPY decision that produced an order</div>
+
+{% if not n_total %}
+<p>No copied trades yet — nothing to analyze until at least one COPY decision produces an order.</p>
+{% else %}
+
+<div class="card">
+  <div class="chip-row">
+    <span class="chip"><strong>{{ n_total }}</strong> copied trades</span>
+    <span class="chip"><span class="chip-dot chip-dot-blue"></span><strong>{{ n_chain }}</strong> chain-sourced</span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span><strong>{{ n_dataapi }}</strong> dataapi-sourced</span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Headline (chain-sourced fills — trustworthy block timestamps)</h3>
+  <div class="stat-row">
+    <div class="stat">
+      <div class="label">Median (p50)</div>
+      <div class="value">{{ "%.2f"|format(stage.total_p50) if stage.total_p50 is not none else "—" }}s</div>
+    </div>
+    <div class="stat">
+      <div class="label">p90</div>
+      <div class="value">{{ "%.2f"|format(stage.total_p90) if stage.total_p90 is not none else "—" }}s</div>
+    </div>
+    <div class="stat">
+      <div class="label">p99</div>
+      <div class="value">{{ "%.2f"|format(stage.total_p99) if stage.total_p99 is not none else "—" }}s</div>
+    </div>
+    <div class="stat">
+      <div class="label">Worst case</div>
+      <div class="value" style="color:#f87171">{{ "%.2f"|format(stage.total_max) if stage.total_max is not none else "—" }}s</div>
+    </div>
+    <div class="stat">
+      <div class="label">Within 4s</div>
+      <div class="value">{{ "%.0f%%"|format(stage.pct_within_4s) if stage.pct_within_4s is not none else "—" }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Where the time goes (median seconds per stage, chain-sourced)</h3>
+  {% for stg in funnel %}
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.65rem;">
+    <div style="width:230px;font-size:0.85rem;color:var(--text-muted);flex:none;">{{ stg.label }}</div>
+    <div style="flex:1;height:20px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;">
+      <div style="height:100%;width:{{ stg.pct }}%;background:var(--accent);border-radius:4px;"></div>
+    </div>
+    <div style="width:100px;text-align:right;font-size:0.85rem;font-weight:700;flex:none;font-variant-numeric:tabular-nums;">
+      {{ "%.3f"|format(stg.p50) if stg.p50 is not none else "—" }}s
+      <span style="font-weight:400;color:var(--text-muted);">(p90 {{ "%.3f"|format(stg.p90) if stg.p90 is not none else "—" }})</span>
+    </div>
+  </div>
+  {% endfor %}
+  <p class="field-hint" style="margin-top:0.75rem;">Bar widths are scaled to the {{ "%.2f"|format(stage.total_p50) if stage.total_p50 is not none else "—" }}s median total, so relative widths show where the pipeline actually spends time.</p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Distribution of total latency (chain-sourced, n={{ n_chain }})</h3>
+  <div style="display:flex;align-items:flex-end;gap:0.5rem;height:150px;margin-top:0.5rem;">
+    {% for h in histogram %}
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;">
+      <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.3rem;">{{ h.n }}</div>
+      <div style="width:100%;background:{{ '#f87171' if h.label == '>10s' and h.n > 0 else 'var(--accent)' }};border-radius:3px 3px 0 0;min-height:2px;height:{{ h.pct }}%;"></div>
+      <div style="font-size:0.68rem;color:var(--text-muted);margin-top:0.4rem;text-align:center;">{{ h.label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Order outcomes</h3>
+  <div class="chip-row">
+    <span class="chip"><span class="pill pill-filled">filled</span> <strong>{{ outcomes.filled.n }}</strong> ({{ outcomes.filled.pct }}%)</span>
+    <span class="chip"><span class="pill pill-partial">partial</span> <strong>{{ outcomes.partial.n }}</strong> ({{ outcomes.partial.pct }}%)</span>
+    <span class="chip"><span class="pill pill-rejected">rejected</span> <strong>{{ outcomes.rejected.n }}</strong> ({{ outcomes.rejected.pct }}%)</span>
+  </div>
+</div>
+
+{% if n_dataapi > 0 %}
+<div class="banner banner-readonly">
+  <strong>Data quality:</strong> {{ n_dataapi }} of {{ n_total }} copied trades ({{ "%.0f%%"|format(100 * n_dataapi / n_total) }}) come from
+  the <code>dataapi</code> source rather than direct chain events. For those, <code>block_ts</code> is not a reliable on-chain-time anchor —
+  it can land after our own <code>detected_at</code>, an indexing artifact of that source rather than real negative latency — so they're
+  excluded from the headline numbers above. Measured from our own detection instead, they took a median of
+  {{ "%.2f"|format(dataapi.p50) if dataapi.p50 is not none else "—" }}s (p90 {{ "%.2f"|format(dataapi.p90) if dataapi.p90 is not none else "—" }}s)
+  to reach a terminal order state.
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0;">Slowest 10 trades (chain-sourced)</h3>
+  {% if not slowest %}
+  <p>No completed chain-sourced trades yet.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Fill ID</th><th>Target</th><th>Side</th><th>On-chain time</th><th>Total latency</th><th>Outcome</th></tr>
+    </thead>
+    <tbody>
+      {% for r in slowest %}
+      <tr>
+        <td><code>{{ r.fill_id }}</code></td>
+        <td>{{ r.alias or (r.target[:10] + "…") }}</td>
+        <td>{{ r.side }}</td>
+        <td><span data-utc="{{ r.block_ts.isoformat() }}">{{ r.block_ts.strftime("%Y-%m-%d %H:%M:%S") }} UTC</span></td>
+        <td style="font-weight:700;{{ 'color:#f87171' if r.total_lat > 10 else '' }}">
+          {{ "%.2f"|format(r.total_lat) }}s
+          {% if r.detect_lat is not none and r.detect_lat < 0 %}<br><span style="font-size:0.72rem;font-weight:400;color:#fbbf24;">⚠ timestamp anomaly — detected before block_ts</span>{% endif %}
+        </td>
+        <td><span class="pill pill-{{ r.terminal_state }}">{{ r.terminal_state }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% endif %}
+{% endblock %}
