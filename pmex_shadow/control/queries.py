@@ -113,6 +113,15 @@ def _skip_summary(reason: str, detail: dict | None) -> str | None:
     return " · ".join(f"{k}: {v}" for k, v in detail.items())
 
 
+def _context_summary(context: dict | None) -> str | None:
+    """`events.context` has no per-message format the way skip_detail has per-reason
+    (events come from a handful of unrelated components, not one policy engine) — a
+    flat `key: value` join is honest rather than guessing a nicer format per message."""
+    if not context:
+        return None
+    return " · ".join(f"{k}: {v}" for k, v in context.items())
+
+
 async def fleet_view(conn: asyncpg.Connection) -> list[dict]:
     """Per bot: mode, watcher-relative lag, exposure vs envelope, today's PnL, skip
     rate, last fill — the fleet-view screen (design doc §3.8)."""
@@ -268,10 +277,13 @@ async def bot_detail(
     )
     log_total = await conn.fetchval("SELECT count(*) FROM events WHERE bot_id = $1", bot_id)
     log_pg = _page_info(log_page, LOGS_PAGE_SIZE, log_total)
-    logs = await conn.fetch(
+    logs = [dict(r) for r in await conn.fetch(
         "SELECT level, component, message, context, at FROM events WHERE bot_id = $1 ORDER BY at DESC LIMIT $2 OFFSET $3",
         bot_id, log_pg["page_size"], log_pg["offset"],
-    )
+    )]
+    for l in logs:
+        l["context"] = _jsonb(l["context"]) if l["context"] is not None else None
+        l["context_summary"] = _context_summary(l["context"])
 
     config_row = await conn.fetchrow("SELECT config FROM bot_config WHERE bot_id = $1 AND active", bot_id)
     envelope_usd = _jsonb(config_row["config"]).get("risk", {}).get("envelope_usd") if config_row else None
@@ -325,12 +337,53 @@ async def targets_view(conn: asyncpg.Connection) -> list[dict]:
     )
 
 
-async def logs_view(conn: asyncpg.Connection, bot_id: str | None, limit: int = 200) -> list[dict]:
+async def logs_view(
+    conn: asyncpg.Connection, bot_id: str | None, component: str | None, level: str | None, page: int = 1,
+) -> dict:
+    """The global /logs page (FR-C-2). `component` defaults to excluding the `paper`
+    research logger — it's ~98% of raw event volume in practice (one row per
+    simulated fill, across every fill of every watched target, not just this bot's
+    own decisions) and drowns out the handful of actually operational rows
+    (watcher.chain reconnects, bot.health halts) that make this page worth looking
+    at. `component="all"` opts back in. Found investigating a report that this page
+    was unreadable — it was, but the underlying rows (context especially) were
+    already fine; nothing here was previously rendered or filterable at all.
+    """
+    all_components = [r["component"] for r in await conn.fetch("SELECT DISTINCT component FROM events ORDER BY component")]
+    all_levels = [r["level"] for r in await conn.fetch("SELECT DISTINCT level FROM events ORDER BY level")]
+
+    where = []
+    params: list = []
     if bot_id:
-        return await conn.fetch(
-            "SELECT bot_id, level, component, message, context, at FROM events WHERE bot_id = $1 ORDER BY at DESC LIMIT $2",
-            bot_id, limit,
-        )
-    return await conn.fetch(
-        "SELECT bot_id, level, component, message, context, at FROM events ORDER BY at DESC LIMIT $1", limit,
+        params.append(bot_id)
+        where.append(f"bot_id = ${len(params)}")
+    if component == "all":
+        pass
+    elif component:
+        params.append(component)
+        where.append(f"component = ${len(params)}")
+    else:
+        params.append("paper")
+        where.append(f"component != ${len(params)}")
+    if level:
+        params.append(level)
+        where.append(f"level = ${len(params)}")
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+    total = await conn.fetchval(f"SELECT count(*) FROM events {where_sql}", *params)
+    pg = _page_info(page, LOGS_PAGE_SIZE, total)
+    rows = await conn.fetch(
+        f"SELECT bot_id, level, component, message, context, at FROM events {where_sql} "
+        f"ORDER BY at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}",
+        *params, pg["page_size"], pg["offset"],
     )
+    logs = [dict(r) for r in rows]
+    for l in logs:
+        l["context"] = _jsonb(l["context"]) if l["context"] is not None else None
+        l["context_summary"] = _context_summary(l["context"])
+
+    return {
+        "logs": logs, "pg": pg,
+        "all_components": all_components, "all_levels": all_levels,
+        "component": component, "level": level, "bot_id": bot_id,
+    }

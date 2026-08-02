@@ -146,10 +146,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse(f"/targets?message={quote(message)}", status_code=303)
 
     @app.get("/logs")
-    async def logs(request: Request, bot_id: str | None = None):
+    async def logs(request: Request, bot_id: str | None = None, component: str | None = None, level: str | None = None, page: int = 1):
         async with app.state.pool.acquire() as conn:
-            rows = await queries.logs_view(conn, bot_id)
-        return templates.TemplateResponse(request, "logs.html", _ctx(request, logs=rows, active_nav="logs"))
+            result = await queries.logs_view(conn, bot_id, component, level, page)
+        return templates.TemplateResponse(request, "logs.html", _ctx(request, active_nav="logs", **result))
 
     @app.get("/bots/{bot_id}/params")
     async def params_form(request: Request, bot_id: str, message: str | None = None, applied: bool | None = None):

@@ -127,7 +127,10 @@
       <tr>
         <td><span class="pill pill-{{ l.level }}">{{ l.level }}</span></td>
         <td>{{ l.component }}</td>
-        <td>{{ l.message }}</td>
+        <td>
+          {{ l.message }}
+          {% if l.context_summary %}<div style="font-size:0.8rem;opacity:0.75;margin-top:0.25rem;word-break:break-word;">{{ l.context_summary }}</div>{% endif %}
+        </td>
         <td><span data-utc="{{ l.at.isoformat() }}">{{ l.at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</span></td>
       </tr>
       {% endfor %}

@@ -2,8 +2,35 @@
 {% block title %}Logs — pmex-shadow{% endblock %}
 {% block content %}
 <h1>Logs</h1>
+
+<form method="get" style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap;">
+  <label style="display:flex;align-items:center;gap:0.4rem;">
+    Component
+    <select name="component" onchange="this.form.submit()">
+      <option value="" {% if not component %}selected{% endif %}>All (excluding paper)</option>
+      <option value="all" {% if component == "all" %}selected{% endif %}>All (including paper)</option>
+      {% for c in all_components %}
+      <option value="{{ c }}" {% if component == c %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label style="display:flex;align-items:center;gap:0.4rem;">
+    Level
+    <select name="level" onchange="this.form.submit()">
+      <option value="" {% if not level %}selected{% endif %}>All</option>
+      {% for lv in all_levels %}
+      <option value="{{ lv }}" {% if level == lv %}selected{% endif %}>{{ lv }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% if bot_id %}
+  <span style="opacity:0.65;">bot: {{ bot_id }} (<a href="/logs?component={{ component or '' }}&level={{ level or '' }}">clear</a>)</span>
+  {% endif %}
+  <noscript><button type="submit">Apply</button></noscript>
+</form>
+
 {% if not logs %}
-<p>No log entries.</p>
+<p>No log entries{% if component and component != "all" %} for component {{ component }}{% endif %}{% if level %} at level {{ level }}{% endif %}.</p>
 {% else %}
 <table>
   <thead><tr><th>At</th><th>Bot</th><th>Level</th><th>Component</th><th>Message</th></tr></thead>
@@ -14,10 +41,24 @@
       <td>{{ l.bot_id or "—" }}</td>
       <td><span class="pill pill-{{ l.level }}">{{ l.level }}</span></td>
       <td>{{ l.component }}</td>
-      <td>{{ l.message }}</td>
+      <td>
+        {{ l.message }}
+        {% if l.context_summary %}<div style="font-size:0.8rem;opacity:0.75;margin-top:0.25rem;word-break:break-word;">{{ l.context_summary }}</div>{% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+{% if pg.total_pages > 1 %}
+<div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.75rem;font-size:0.85rem;">
+  {% if pg.page > 1 %}
+  <a href="?component={{ component or '' }}&level={{ level or '' }}&bot_id={{ bot_id or '' }}&page={{ pg.page - 1 }}">← Prev</a>
+  {% else %}<span style="opacity:0.35;">← Prev</span>{% endif %}
+  <span style="opacity:0.65;">Page {{ pg.page }} of {{ pg.total_pages }} · {{ pg.total }} total</span>
+  {% if pg.page < pg.total_pages %}
+  <a href="?component={{ component or '' }}&level={{ level or '' }}&bot_id={{ bot_id or '' }}&page={{ pg.page + 1 }}">Next →</a>
+  {% else %}<span style="opacity:0.35;">Next →</span>{% endif %}
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}
