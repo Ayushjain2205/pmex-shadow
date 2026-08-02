@@ -75,10 +75,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(content=body, media_type="text/plain; version=0.0.4")
 
     @app.get("/")
-    async def fleet(request: Request):
+    async def fleet(request: Request, message: str | None = None, error: str | None = None):
         async with app.state.pool.acquire() as conn:
             result = await queries.fleet_view(conn)
-        return templates.TemplateResponse(request, "fleet.html", _ctx(request, active_nav="fleet", **result))
+        return templates.TemplateResponse(request, "fleet.html", _ctx(request, active_nav="fleet", message=message, error=error, **result))
+
+    @app.post("/bots/{bot_id}/halt")
+    async def bot_halt(request: Request, bot_id: str):
+        from urllib.parse import quote
+
+        from pmex_shadow.ops.killswitch import halt_bot
+
+        async with app.state.pool.acquire() as conn:
+            current = await config_write.get_active_config(conn, bot_id)
+            if current is None:
+                return RedirectResponse(f"/?error={quote(f'bot {bot_id} not found')}", status_code=303)
+            await halt_bot(conn, bot_id, "manual stop (control UI)", flatten=False)
+        return RedirectResponse(f"/?message={quote(f'{bot_id} halted')}", status_code=303)
+
+    @app.post("/bots/{bot_id}/resume")
+    async def bot_resume_route(request: Request, bot_id: str):
+        from urllib.parse import quote
+
+        from pmex_shadow.ops.killswitch import resume_bot
+
+        async with app.state.pool.acquire() as conn:
+            current = await config_write.get_active_config(conn, bot_id)
+            if current is None:
+                return RedirectResponse(f"/?error={quote(f'bot {bot_id} not found')}", status_code=303)
+            await resume_bot(conn, bot_id)
+        return RedirectResponse(f"/?message={quote(f'{bot_id} resumed')}", status_code=303)
 
     @app.get("/bots/{bot_id}")
     async def bot_detail(request: Request, bot_id: str, pos_page: int = 1, dec_page: int = 1, log_page: int = 1):

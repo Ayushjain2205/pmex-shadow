@@ -165,6 +165,26 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
         heartbeat_at = heartbeat["at"] if heartbeat else None
         is_stale = heartbeat_at is None or dt.datetime.now(dt.timezone.utc) - heartbeat_at > BOT_HEARTBEAT_STALE_AFTER
 
+        # Mirrors ledger/subaccount.py's get_ledger_state() halted check exactly
+        # (same events, same "most recent halt vs most recent resume" rule) — not
+        # imported from there since that function also pulls positions/exposure
+        # this view doesn't need; duplicated as one query pair, not re-derived
+        # differently.
+        last_halt = await conn.fetchrow(
+            "SELECT component, message, context, at FROM events WHERE bot_id = $1 AND level = 'CRITICAL' "
+            "AND component IN ('ledger.reconcile', 'killswitch') ORDER BY at DESC LIMIT 1",
+            bot_id,
+        )
+        last_resume = await conn.fetchrow(
+            "SELECT at FROM events WHERE bot_id = $1 AND component = 'killswitch' AND message = 'resumed' ORDER BY at DESC LIMIT 1",
+            bot_id,
+        )
+        halted = last_halt is not None and (last_resume is None or last_halt["at"] > last_resume["at"])
+        halt_reason = None
+        if halted:
+            ctx = _jsonb(last_halt["context"]) if last_halt["context"] is not None else {}
+            halt_reason = ctx.get("reason") or last_halt["message"]
+
         rows.append({
             "bot_id": bot_id,
             "mode": config.get("mode"),
@@ -173,6 +193,8 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
             "deployed_usd": deployed["deployed"],
             "today_pnl_usd": today_pnl["pnl"],
             "skip_rate_24h": skip_rate,
+            "halted": halted,
+            "halt_reason": halt_reason,
             "last_fill_at": last_fill["at"],
             "heartbeat_at": heartbeat_at,
             "is_stale": is_stale,
@@ -180,7 +202,8 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
 
     summary = {
         "count": len(rows),
-        "active_count": sum(1 for r in rows if not r["is_stale"]),
+        "active_count": sum(1 for r in rows if not r["halted"]),
+        "halted_count": sum(1 for r in rows if r["halted"]),
         "stale_count": sum(1 for r in rows if r["is_stale"]),
         "live_count": sum(1 for r in rows if r["mode"] == "live"),
         "paper_count": sum(1 for r in rows if r["mode"] == "paper"),
