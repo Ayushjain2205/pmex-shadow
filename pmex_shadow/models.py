@@ -8,11 +8,11 @@ data (§10 Determinism).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Literal, Mapping
 
 
 class Side(str, Enum):
@@ -89,6 +89,20 @@ class MarketMeta:
     tradeable: bool
     event_id: str | None
     resolution_days_out: int | None  # days from `now` to resolution; None if unknown
+
+    # Match attributes for the deny/allow rules (policy/match.py). A flat bag rather
+    # than named fields because the useful discriminator differs per market family and
+    # isn't knowable here: crypto up/down markets carry it as `asset`/`duration`
+    # (Gamma's `cryptoMarketConfig`), daily weather as `series` plus geography `tag`s.
+    # Keeping it untyped means adding a family touches only the extractor in
+    # market/cache.py -- not this type, not the rule matcher, not the config schema.
+    #
+    # A key absent from the bag means "this market has no such attribute," which is
+    # NOT the same as "the attribute is empty" -- match.py leans on that distinction
+    # to fail closed on allow rules while leaving deny rules inert. Values are sets
+    # because several are genuinely multi-valued (a market carries every one of its
+    # event's tags), so membership is the only sound test.
+    attrs: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

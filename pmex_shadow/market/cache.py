@@ -49,6 +49,69 @@ async def get_orderbook(clob_base_url: str, token_id: str) -> BookSnapshot | Non
     )
 
 
+def _category_from_event(event: dict | None) -> str | None:
+    """The single `category` label (see get_market_meta's docstring for why it's the
+    first non-"All" tag rather than the tag set). Superseded by the `tag` match
+    attribute below, which keeps every tag — kept because existing bot configs and
+    the control UI's params form both still write `selectors.categories`.
+    """
+    if event is None:
+        return None
+    tags = event.get("tags") or []
+    non_generic = [t["label"] for t in tags if t.get("label") and t["label"].lower() != "all"]
+    return non_generic[0] if non_generic else None
+
+
+def market_attrs(market: dict, event: dict | None) -> dict[str, frozenset[str]]:
+    """Build MarketMeta.attrs — the flat bag the deny/allow rules match against.
+
+    Pure, and deliberately split from the fetch above so it can be tested against
+    captured payloads (tests/fixtures/real_gamma_market_meta.json) rather than shapes
+    invented from the docs. Adding a new market family should only ever touch here.
+
+    A key is omitted entirely when the market has no such attribute, which is load
+    bearing: match.py distinguishes "absent" from "present but non-matching," so
+    emitting an empty frozenset instead of omitting would quietly turn a fail-closed
+    allow rule into a pass. That also means a transient failure on the event fetch
+    (event=None) drops `series`/`tag` and makes allow-scoped bots skip rather than
+    guess, consistent with FR-M-3.
+
+    Tag values are Gamma's `slug`s, not the `label`s `category` uses — slugs are
+    lowercase, stable, and what shows up in URLs ("new-york-city", not "New York
+    City"), so they're what a config author can actually predict.
+    """
+    attrs: dict[str, frozenset[str]] = {}
+
+    slug = market.get("slug")
+    if slug:
+        attrs["slug"] = frozenset({slug})
+
+    # Crypto up/down markets carry their underlying and cadence structurally, which is
+    # the only reliable way to tell BTC from SOL from XRP within one series family --
+    # they share a category, and their event ids change every recurrence.
+    cfg = market.get("cryptoMarketConfig") or {}
+    if cfg.get("asset"):
+        attrs["asset"] = frozenset({str(cfg["asset"]).lower()})
+    if cfg.get("duration"):
+        attrs["duration"] = frozenset({str(cfg["duration"]).lower()})
+
+    if event is not None:
+        if event.get("id"):
+            attrs["event_id"] = frozenset({str(event["id"])})
+        series = {s["slug"] for s in (event.get("series") or []) if s.get("slug")}
+        if series:
+            attrs["series"] = frozenset(series)
+        tags = {t["slug"] for t in (event.get("tags") or []) if t.get("slug")}
+        if tags:
+            attrs["tag"] = frozenset(tags)
+
+    category = _category_from_event(event)
+    if category:
+        attrs["category"] = frozenset({category})
+
+    return attrs
+
+
 async def get_market_meta(gamma_api_base_url: str, token_id: str) -> MarketMeta | None:
     """Fetch category/tick-size/neg-risk/tradeable metadata for a token from Gamma
     (docs/VERIFIED.md item 6). Returns None on a cache miss (FR-M-3: a scoped bot
@@ -73,23 +136,24 @@ async def get_market_meta(gamma_api_base_url: str, token_id: str) -> MarketMeta 
         return None
     m = markets[0]
 
-    category = None
     events = m.get("events") or []
+    event: dict | None = None
     if events:
         event_id = events[0].get("id")
         try:
-            ev_resp = await httpx.AsyncClient(timeout=10).get(
-                f"{gamma_api_base_url.rstrip('/')}/events", params={"id": event_id}
-            )
+            async with httpx.AsyncClient(timeout=10) as ev_client:
+                ev_resp = await ev_client.get(
+                    f"{gamma_api_base_url.rstrip('/')}/events", params={"id": event_id}
+                )
             ev_list = ev_resp.json() if ev_resp.status_code == 200 else []
         except httpx.HTTPError:
             ev_list = []
         if ev_list:
-            tags = ev_list[0].get("tags") or []
-            non_generic = [t["label"] for t in tags if t.get("label") and t["label"].lower() != "all"]
-            category = non_generic[0] if non_generic else None
+            event = ev_list[0]
     else:
         event_id = None
+
+    category = _category_from_event(event)
 
     resolution_days_out = None
     end_date_iso = m.get("endDateIso")
@@ -109,6 +173,7 @@ async def get_market_meta(gamma_api_base_url: str, token_id: str) -> MarketMeta 
         tradeable=bool(m.get("acceptingOrders", False)) and not m.get("closed", False),
         event_id=str(event_id) if event_id else None,
         resolution_days_out=resolution_days_out,
+        attrs=market_attrs(m, event),
     )
 
 
