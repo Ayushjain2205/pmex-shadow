@@ -181,11 +181,18 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
             ctx = _jsonb(last_halt["context"]) if last_halt["context"] is not None else {}
             halt_reason = ctx.get("reason") or last_halt["message"]
 
+        envelope_usd = Decimal(str(config.get("risk", {}).get("envelope_usd") or 0))
+
         rows.append({
             "bot_id": bot_id,
             "mode": config.get("mode"),
             "version": b["version"],
-            "envelope_usd": config.get("risk", {}).get("envelope_usd"),
+            # Same "current total capital" figure bot_detail.html's "Wallet
+            # (envelope + realized)" stat already shows — envelope alone is just
+            # the operator's original config number, not useful at a glance next
+            # to Deployed (which is live state); portfolio = what the bot's
+            # actually worth right now.
+            "portfolio_usd": envelope_usd + total_pnl["pnl"],
             "deployed_usd": deployed["deployed"],
             "today_pnl_usd": today_pnl["pnl"],
             "total_pnl_usd": total_pnl["pnl"],
