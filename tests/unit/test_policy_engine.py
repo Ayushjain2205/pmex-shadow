@@ -5,6 +5,7 @@ import pytest
 
 from pmex_shadow.config import (
     BotConfig,
+    MatchRule,
     PolicyProfile,
     RiskConfig,
     RiskGlobalConfig,
@@ -285,6 +286,87 @@ def test_selector_category_passes_when_matching():
     bot = make_bot(selectors=SelectorsConfig(categories=["sports"]))
     d = run_decide(bot=bot, market=make_market(category="sports"))
     assert isinstance(d, Intent)
+
+
+SOL_5M_ATTRS = {
+    "asset": frozenset({"sol"}),
+    "duration": frozenset({"5m"}),
+    "series": frozenset({"sol-up-or-down-5m"}),
+    "tag": frozenset({"crypto-prices", "up-or-down"}),
+}
+BTC_5M_ATTRS = {**SOL_5M_ATTRS, "asset": frozenset({"btc"}), "series": frozenset({"btc-up-or-down-5m"})}
+
+
+def deny_rules(*raw):
+    return SelectorsConfig(deny=[MatchRule.model_validate(r) for r in raw])
+
+
+def allow_rules(*raw):
+    return SelectorsConfig(allow=[MatchRule.model_validate(r) for r in raw])
+
+
+def test_deny_rule_excludes_one_asset_within_a_copied_series():
+    """The motivating case: copy a wallet trading BTC/SOL/XRP 5m, minus SOL. Category
+    can't express it (all three share one) and event ids can't either (a new one every
+    five minutes)."""
+    bot = make_bot(selectors=deny_rules({"asset": "sol"}))
+
+    denied = run_decide(bot=bot, market=make_market(attrs=SOL_5M_ATTRS))
+    assert isinstance(denied, Skip) and denied.reason == "selector_deny"
+    assert denied.detail["matched_rule"] == {"asset": "sol"}
+
+    assert isinstance(run_decide(bot=bot, market=make_market(attrs=BTC_5M_ATTRS)), Intent)
+
+
+def test_deny_rule_does_not_leak_across_market_families():
+    """{asset: sol} must stay inert against markets with no `asset` at all, or one
+    crypto exclusion would silently halt every other family the bot copies."""
+    bot = make_bot(selectors=deny_rules({"asset": "sol"}))
+    weather = make_market(attrs={"series": frozenset({"nyc-daily-weather"}), "tag": frozenset({"weather"})})
+    assert isinstance(run_decide(bot=bot, market=weather), Intent)
+
+
+def test_allow_rule_fails_closed_on_unidentifiable_markets():
+    bot = make_bot(selectors=allow_rules({"asset": ["btc", "xrp"]}))
+
+    assert isinstance(run_decide(bot=bot, market=make_market(attrs=BTC_5M_ATTRS)), Intent)
+
+    for attrs in (SOL_5M_ATTRS, {}):
+        d = run_decide(bot=bot, market=make_market(attrs=attrs))
+        assert isinstance(d, Skip) and d.reason == "selector_allow"
+
+
+def test_deny_beats_allow():
+    bot = make_bot(selectors=SelectorsConfig(
+        allow=[MatchRule.model_validate({"tag": "crypto-prices"})],
+        deny=[MatchRule.model_validate({"asset": "sol"})],
+    ))
+    d = run_decide(bot=bot, market=make_market(attrs=SOL_5M_ATTRS))
+    assert isinstance(d, Skip) and d.reason == "selector_deny"
+
+
+def test_skip_detail_carries_the_market_attributes():
+    """"Why didn't my rule fire" is almost always "the market isn't what you assumed,"
+    so the skip row has to answer it without a re-fetch."""
+    bot = make_bot(selectors=deny_rules({"asset": "sol"}))
+    d = run_decide(bot=bot, market=make_market(attrs=SOL_5M_ATTRS))
+    assert d.detail["market_attrs"]["series"] == ["sol-up-or-down-5m"]
+    assert d.detail["market_attrs"]["tag"] == ["crypto-prices", "up-or-down"]
+
+
+def test_deny_rules_do_not_block_exits_either():
+    """Same stranding hazard as the legacy selectors: adding {asset: sol} while
+    holding SOL must not trap the position."""
+    our_position = Position(token_id="tok1", shares=Decimal("79"), cost_basis_usd=Decimal("49.77"))
+    ledger = make_ledger(positions=make_ledger().positions + (our_position,))
+    sell_fill = make_fill(side=Side.SELL, price=Decimal("0.65"), notional_usd=Decimal("260"), size=Decimal("400"))
+
+    d = run_decide(
+        fill=sell_fill, bot=make_bot(selectors=deny_rules({"asset": "sol"})), ledger=ledger,
+        market=make_market(attrs=SOL_5M_ATTRS), target=make_target(position_before=Decimal("1000")),
+        book=make_book(bids=[(Decimal("0.64"), Decimal("100000"))]),
+    )
+    assert isinstance(d, Intent) and d.side == Side.SELL
 
 
 def test_selectors_do_not_block_exits():

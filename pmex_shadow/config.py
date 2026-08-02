@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from pmex_shadow.models import MATCH_ATTRIBUTES
 
 
 class ConfigError(ValueError):
@@ -40,6 +44,83 @@ class WalletConfig(BaseModel):
     pk_env: str
 
 
+@dataclass(frozen=True)
+class MatchValue:
+    """One rule value: either a set of literals, or a compiled pattern.
+
+    Patterns are matched with `fullmatch`, never `search`. An unanchored `sol` would
+    also match `solana-...` and `consolidated-...`, and the failure is silent and in
+    the wrong direction — you'd deny markets you meant to keep, or (worse, on an
+    allow rule) admit ones you meant to exclude. Requiring `sol.*` costs one
+    character and can't surprise anyone.
+    """
+
+    literals: frozenset[str] | None = None
+    pattern: re.Pattern[str] | None = None
+
+    def matches(self, values: frozenset[str]) -> bool:
+        if self.literals is not None:
+            return bool(self.literals & values)
+        assert self.pattern is not None
+        return any(self.pattern.fullmatch(v) for v in values)
+
+    def describe(self) -> str:
+        if self.literals is not None:
+            return "|".join(sorted(self.literals))
+        assert self.pattern is not None
+        return f"re:{self.pattern.pattern}"
+
+
+def _match_value(key: str, raw: Any) -> MatchValue:
+    if isinstance(raw, dict):
+        if set(raw) != {"re"} or not isinstance(raw["re"], str):
+            raise ConfigError(
+                f"selector rule '{key}': a mapping value must be exactly {{re: '<pattern>'}}, got {raw!r}"
+            )
+        try:
+            return MatchValue(pattern=re.compile(raw["re"]))
+        except re.error as exc:
+            # Compiled at load, not at match time: a bad pattern must stop the bot
+            # from starting, not surface mid-copy as a crash on some future fill.
+            raise ConfigError(f"selector rule '{key}': invalid regex {raw['re']!r} — {exc}") from exc
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    if not values:
+        raise ConfigError(f"selector rule '{key}': empty value list matches nothing — remove the key instead")
+    literals = set()
+    for v in values:
+        if not isinstance(v, (str, int)):
+            raise ConfigError(f"selector rule '{key}': expected a string, list of strings, or {{re: ...}}, got {v!r}")
+        literals.add(str(v).lower())
+    return MatchValue(literals=frozenset(literals))
+
+
+class MatchRule(RootModel[dict[str, MatchValue]]):
+    """One deny/allow rule: `{attr: value}` pairs that must ALL match (AND).
+
+    e.g. `{asset: sol}`, or `{tag: crypto-prices, duration: 5m}` for "5-minute crypto
+    markets specifically". OR is expressed by writing several rules in the list.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, raw: Any) -> Any:
+        if not isinstance(raw, dict) or not raw:
+            raise ConfigError(f"selector rule must be a non-empty mapping of attribute to value, got {raw!r}")
+        unknown = set(raw) - MATCH_ATTRIBUTES
+        if unknown:
+            raise ConfigError(
+                f"selector rule uses unknown attribute(s) {sorted(unknown)} — "
+                f"known attributes are {sorted(MATCH_ATTRIBUTES)}"
+            )
+        return {key: _match_value(key, value) for key, value in raw.items()}
+
+    def describe(self) -> dict[str, str]:
+        """Human-readable form of the rule, for skip_detail."""
+        return {key: value.describe() for key, value in self.root.items()}
+
+
 class SelectorsConfig(BaseModel):
     """Optional filters that compose with AND (FR-P-2). Absent = no constraint."""
 
@@ -49,6 +130,13 @@ class SelectorsConfig(BaseModel):
     min_target_notional_usd: Decimal | None = None
     max_time_to_resolution_days: int | None = None
     event_ids: list[str] | None = None
+
+    # Identity rules over MarketMeta.attrs, evaluated deny-then-allow. These exist
+    # because `categories` can't separate markets inside one family (BTC/SOL/XRP 5m
+    # all share a category) and `event_ids` can't span one (a 5m series mints a new
+    # event every recurrence). See policy/match.py for the deny/allow asymmetry.
+    deny: list[MatchRule] | None = None
+    allow: list[MatchRule] | None = None
 
 
 class PolicyRef(BaseModel):

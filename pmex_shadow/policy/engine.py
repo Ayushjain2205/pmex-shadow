@@ -31,6 +31,7 @@ from pmex_shadow.models import (
     TargetPolicyStats,
 )
 from pmex_shadow.policy.guards import slippage_guard, staleness_guard, volatility_guard
+from pmex_shadow.policy.match import describe_attrs, first_denied, is_allowed
 from pmex_shadow.policy.sizing import exit_shares, multiplier_for_percentile, percentile_of_value, shares_from_usd
 
 _PAUSED_STATUSES = {"paused_decay", "paused_dormant", "paused_manual"}
@@ -105,6 +106,20 @@ def decide(
 
     # --- Selectors (FR-P-2): AND, absent = no constraint. Entry-only, see above. ---
     sel = bot.selectors
+
+    # Identity rules go first: they're pure dict lookups, they're the most specific
+    # thing a config can say, and consumer.py evaluates deny before it fetches a book
+    # at all — keeping the order the same here means the fast path can never disagree
+    # with the authoritative decision about which reason a fill was skipped for.
+    denied = first_denied(sel.deny, market.attrs)
+    if denied is not None:
+        return skip("selector_deny", {"matched_rule": denied.describe(), "market_attrs": describe_attrs(market.attrs)})
+    if not is_allowed(sel.allow, market.attrs):
+        return skip("selector_allow", {
+            "allow_rules": [r.describe() for r in sel.allow or []],
+            "market_attrs": describe_attrs(market.attrs),
+        })
+
     if sel.categories is not None:
         if market.category is None:
             return skip("unknown_category")  # FR-M-3: fail closed, never guess

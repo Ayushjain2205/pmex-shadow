@@ -204,6 +204,25 @@ class Skip:
 
 Decision = Intent | Skip
 
+# The attribute vocabulary deny/allow rules may key on — the contract between the
+# extractor that populates MarketMeta.attrs (market/cache.py) and the config that
+# matches against it (config.py's MatchRule). Lives here so neither has to import the
+# other. Extending it is how a new filtering dimension gets added; a rule naming
+# anything outside it is a config error rather than a silently-never-matching rule,
+# because a typo'd deny key ("assett: sol") fails open — you keep copying the market
+# you meant to exclude and nothing tells you.
+MATCH_ATTRIBUTES = frozenset(
+    {
+        "asset",     # crypto underlying: btc, sol, xrp (Gamma cryptoMarketConfig)
+        "duration",  # crypto cadence: 5m, 15m
+        "series",    # recurring-series slug: btc-up-or-down-5m, nyc-daily-weather
+        "tag",       # every event tag slug: crypto-prices, weather, new-york-city
+        "event_id",  # one specific event (rarely what you want — it changes per recurrence)
+        "slug",      # market slug, mostly for the `re:` escape hatch
+        "category",  # the single legacy label; prefer `tag`
+    }
+)
+
 # Stable skip reasons (PRD §6). Extend, never rename — the dashboard groups on these.
 SKIP_REASONS = frozenset(
     {
@@ -221,6 +240,8 @@ SKIP_REASONS = frozenset(
         "below_min_order",
         "unknown_category",
         "market_not_tradeable",
+        "selector_deny",
+        "selector_allow",
         "target_paused",
         "netted_out",
         "bot_halted",
