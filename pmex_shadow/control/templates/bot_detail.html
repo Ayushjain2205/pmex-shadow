@@ -29,7 +29,7 @@
     </div>
     <div class="stat">
       <div class="label">Session P&amp;L</div>
-      <div class="value" style="color: {{ 'inherit' if total_realized_pnl == 0 else ('#16a34a' if total_realized_pnl > 0 else '#dc2626') }}">{{ "%+.2f"|format(total_realized_pnl) }}</div>
+      <div class="value" style="color: {{ 'inherit' if total_realized_pnl == 0 else ('#4ade80' if total_realized_pnl > 0 else '#f87171') }}">{{ "%+.2f"|format(total_realized_pnl) }}</div>
     </div>
     <div class="stat">
       <div class="label">Win rate</div>
@@ -164,28 +164,29 @@
   const y = v => padT + plotH - ((v - vMin) / vSpan) * plotH;
 
   const last = values[values.length - 1];
-  const color = last >= 0 ? "#16a34a" : "#dc2626";
+  const color = last >= 0 ? "#4ade80" : "#f87171";
   const zeroY = y(0);
 
   const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(times[i]).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
   const areaPath = `${linePath} L${x(times[times.length - 1]).toFixed(1)},${zeroY.toFixed(1)} L${x(times[0]).toFixed(1)},${zeroY.toFixed(1)} Z`;
 
-  const gridStroke = "color-mix(in srgb, CanvasText 15%, transparent)";
+  const gridStroke = "rgba(148, 163, 184, 0.18)";
+  const textColor = "#e7ebf3";
   const svgNS = "http://www.w3.org/2000/svg";
 
   container.innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:${height}px;overflow:visible;" role="img" aria-label="Cumulative P&L over time">
       <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${width - padR}" y2="${zeroY.toFixed(1)}" stroke="${gridStroke}" stroke-width="1"/>
-      <text x="${padL - 8}" y="${zeroY.toFixed(1)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="CanvasText" opacity="0.6">$0</text>
-      <text x="${padL - 8}" y="${(padT + 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="CanvasText" opacity="0.6">${vMax >= 0 ? "$" + vMax.toFixed(0) : ""}</text>
-      <text x="${padL - 8}" y="${(padT + plotH - 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="CanvasText" opacity="0.6">${vMin < 0 ? "$" + vMin.toFixed(0) : ""}</text>
+      <text x="${padL - 8}" y="${zeroY.toFixed(1)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${textColor}" opacity="0.6">$0</text>
+      <text x="${padL - 8}" y="${(padT + 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${textColor}" opacity="0.6">${vMax >= 0 ? "$" + vMax.toFixed(0) : ""}</text>
+      <text x="${padL - 8}" y="${(padT + plotH - 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${textColor}" opacity="0.6">${vMin < 0 ? "$" + vMin.toFixed(0) : ""}</text>
       <path d="${areaPath}" fill="${color}" opacity="0.10" stroke="none"/>
       <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      <circle cx="${x(times[times.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="4" fill="${color}" stroke="Canvas" stroke-width="2"/>
-      <text x="${x(times[times.length - 1]).toFixed(1)}" y="${(y(last) - 10).toFixed(1)}" text-anchor="end" font-size="12" font-weight="600" fill="CanvasText">${last >= 0 ? "+" : ""}$${last.toFixed(2)}</text>
+      <circle cx="${x(times[times.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="4" fill="${color}" stroke="#11192c" stroke-width="2"/>
+      <text x="${x(times[times.length - 1]).toFixed(1)}" y="${(y(last) - 10).toFixed(1)}" text-anchor="end" font-size="12" font-weight="600" fill="${textColor}">${last >= 0 ? "+" : ""}$${last.toFixed(2)}</text>
       <g id="hover-layer"></g>
     </svg>
-    <div id="chart-tooltip" style="position:absolute;display:none;pointer-events:none;background:Canvas;border:1px solid color-mix(in srgb, CanvasText 20%, transparent);border-radius:6px;padding:0.4rem 0.6rem;font-size:0.8rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);"></div>
+    <div id="chart-tooltip" style="position:absolute;display:none;pointer-events:none;background:#11192c;border:1px solid rgba(148, 163, 184, 0.2);border-radius:6px;padding:0.4rem 0.6rem;font-size:0.8rem;box-shadow:0 2px 8px rgba(0,0,0,0.35);"></div>
   `;
 
   const svg = container.querySelector("svg");

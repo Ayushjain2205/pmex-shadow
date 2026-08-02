@@ -70,7 +70,7 @@
       <td>{{ "%.2f"|format(t.size_p95) if t.size_p95 else "—" }}</td>
       <td>{{ t.fills_30d or 0 }}</td>
       <td>{{ "%.0f%%"|format(t.hit_rate_30d * 100) if t.hit_rate_30d is not none else "—" }}</td>
-      <td style="color: {{ 'inherit' if not t.pnl_30d_usd else ('#16a34a' if t.pnl_30d_usd > 0 else '#dc2626') }}">{{ "$%.2f"|format(t.pnl_30d_usd) if t.pnl_30d_usd is not none else "—" }}</td>
+      <td style="color: {{ 'inherit' if not t.pnl_30d_usd else ('#4ade80' if t.pnl_30d_usd > 0 else '#f87171') }}">{{ "$%.2f"|format(t.pnl_30d_usd) if t.pnl_30d_usd is not none else "—" }}</td>
       <td>{{ "%.0f%%"|format(t.reversal_rate * 100) if t.reversal_rate is not none else "—" }}</td>
       <td>{% if t.last_fill_at %}<span data-utc="{{ t.last_fill_at.isoformat() }}">{{ t.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
       <td><span data-utc="{{ t.computed_at.isoformat() }}" style="opacity:0.6;font-size:0.85rem;">{{ t.computed_at.strftime("%Y-%m-%d %H:%M") }} UTC</span></td>

@@ -2,31 +2,21 @@
 {% block title %}Fleet — pmex-shadow{% endblock %}
 {% block content %}
 <h1>Fleet</h1>
+<div class="subtitle">All bots · read-only view — start/stop from the docker-compose services, not here</div>
 {% if not bots %}
 <p>No bots configured yet. Run <code>pmex-shadow bot new &lt;name&gt;</code> and start it with <code>pmex-shadow bot run &lt;name&gt;</code>.</p>
 {% else %}
 <div class="card">
-  <div class="stat-row">
-    <div class="stat">
-      <div class="label">Bots</div>
-      <div class="value">{{ summary.count }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Active</div>
-      <div class="value" style="color: {{ '#16a34a' if summary.active_count == summary.count else 'inherit' }}">{{ summary.active_count }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Stale heartbeat</div>
-      <div class="value" style="color: {{ '#dc2626' if summary.stale_count > 0 else 'inherit' }}">{{ summary.stale_count }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Live / Paper / Watch</div>
-      <div class="value">{{ summary.live_count }} / {{ summary.paper_count }} / {{ summary.watch_count }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Today's P&amp;L (fleet)</div>
-      <div class="value" style="color: {{ 'inherit' if summary.total_today_pnl_usd == 0 else ('#16a34a' if summary.total_today_pnl_usd > 0 else '#dc2626') }}">{{ "%+.2f"|format(summary.total_today_pnl_usd) }}</div>
-    </div>
+  <div class="chip-row">
+    <span class="chip"><strong>{{ summary.count }}</strong> bots</span>
+    <span class="chip"><span class="chip-dot chip-dot-green"></span><strong>{{ summary.active_count }}</strong> active</span>
+    <span class="chip"><span class="chip-dot {{ 'chip-dot-red' if summary.stale_count > 0 else 'chip-dot-gray' }}"></span><strong>{{ summary.stale_count }}</strong> stale</span>
+    <span class="chip"><span class="chip-dot chip-dot-amber"></span><strong>{{ summary.live_count }}</strong> live</span>
+    <span class="chip"><span class="chip-dot chip-dot-blue"></span><strong>{{ summary.paper_count }}</strong> paper</span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span><strong>{{ summary.watch_count }}</strong> watch</span>
+    <span class="chip">Today's P&amp;L (fleet)
+      <strong style="color: {{ 'inherit' if summary.total_today_pnl_usd == 0 else ('#4ade80' if summary.total_today_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(summary.total_today_pnl_usd) }}</strong>
+    </span>
   </div>
 </div>
 
@@ -39,17 +29,19 @@
     <tr>
       <td><strong>{{ b.bot_id }}</strong></td>
       <td>
-        {% if b.is_stale %}<span class="pill pill-stale">stale</span>
+        {% if b.is_stale %}
+        <span class="pill pill-stale">stale</span>
+        {% if not b.heartbeat_at %}<div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem;">no heartbeat</div>{% endif %}
         {% else %}<span class="pill pill-active">active</span>{% endif %}
       </td>
       <td><span class="pill pill-{{ b.mode }}">{{ b.mode }}</span></td>
       <td>${{ "%.2f"|format(b.envelope_usd|float) if b.envelope_usd else "—" }}</td>
       <td>${{ "%.2f"|format(b.deployed_usd) }}</td>
-      <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#16a34a' if b.today_pnl_usd > 0 else '#dc2626') }}">{{ "%+.2f"|format(b.today_pnl_usd) }}</td>
+      <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#4ade80' if b.today_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(b.today_pnl_usd) }}</td>
       <td>{{ "%.0f%%"|format(b.skip_rate_24h * 100) if b.skip_rate_24h is not none else "—" }}</td>
       <td>{% if b.last_fill_at %}<span data-utc="{{ b.last_fill_at.isoformat() }}">{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
       <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="time">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
-      <td style="white-space:nowrap;"><a href="/bots/{{ b.bot_id }}">view →</a></td>
+      <td style="white-space:nowrap;"><a href="/bots/{{ b.bot_id }}" class="pill pill-COPY" style="text-decoration:none;">view →</a></td>
     </tr>
     {% endfor %}
   </tbody>
