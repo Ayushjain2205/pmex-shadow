@@ -299,6 +299,12 @@ change is versioned and audited in `config_audit`.
 Only `wallet` requires a restart to change; mode, policy profile, envelope, selectors, and
 the target list all hot-reload (FR-C-5). Non-reloadable fields render disabled in the UI.
 
+Freshness columns (last fill, heartbeat) render as "19h ago" rather than a wall-clock
+time — the question there is always *how long ago*, and the exact local timestamp is in
+the tooltip. Because those labels keep ageing, Fleet reloads every 30s (skipped when the
+tab is hidden or a filter has focus): otherwise a live bot drifts into showing a green
+`active` pill next to "6 min ago", which is precisely how a dead one looks.
+
 The dashboard is **read-only** until you set `PMEX_CONTROL_ALLOW_WRITES=1` in `.env`
 (FR-C-8). The port is `PMEX_CONTROL_HOST_PORT`, bound to `127.0.0.1` only.
 

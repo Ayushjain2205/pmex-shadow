@@ -126,15 +126,56 @@
     // Every timestamp on the page is rendered server-side in UTC (data-utc holds
     // the ISO string) and swapped to the viewer's local timezone here — the
     // server has no reliable way to know that, only the browser does.
-    document.querySelectorAll("[data-utc]").forEach((el) => {
-      const d = new Date(el.getAttribute("data-utc"));
-      if (isNaN(d)) return;
+    //
+    // data-mode="relative" renders "4 minutes ago" instead. For freshness columns
+    // (last fill, heartbeat) the question is always "how long ago", and a wall-clock
+    // reading makes you do that subtraction yourself. The exact local timestamp
+    // moves to the tooltip rather than being lost.
+    const RELATIVE_UNITS = [
+      ["year", 31557600], ["month", 2629800], ["day", 86400],
+      ["hour", 3600], ["minute", 60], ["second", 1],
+    ];
+    // "narrow" keeps these to "19h ago" / "2m ago" — these live in table cells that
+    // are too tight for "19 hours ago" without wrapping to three lines, and the
+    // exact timestamp is a hover away.
+    const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "narrow" });
+
+    function absolute(d, mode) {
       const opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false };
-      if (el.getAttribute("data-mode") !== "time") {
+      if (mode !== "time") {
         Object.assign(opts, { year: "numeric", month: "2-digit", day: "2-digit" });
       }
-      el.textContent = d.toLocaleString(undefined, opts);
-    });
+      return d.toLocaleString(undefined, opts);
+    }
+
+    function relative(d) {
+      const seconds = (d.getTime() - Date.now()) / 1000;
+      const magnitude = Math.abs(seconds);
+      if (magnitude < 10) return "now";
+      for (const [unit, size] of RELATIVE_UNITS) {
+        if (magnitude >= size) return rtf.format(Math.round(seconds / size), unit);
+      }
+      return "now";
+    }
+
+    function renderTimestamps() {
+      document.querySelectorAll("[data-utc]").forEach((el) => {
+        const d = new Date(el.getAttribute("data-utc"));
+        if (isNaN(d)) return;
+        const mode = el.getAttribute("data-mode");
+        if (mode === "relative") {
+          el.textContent = relative(d);
+          el.title = absolute(d);
+        } else {
+          el.textContent = absolute(d, mode);
+        }
+      });
+    }
+
+    renderTimestamps();
+    // Nothing on these pages auto-refreshes, so a relative label would otherwise
+    // sit frozen at "now" while the underlying data went stale.
+    setInterval(renderTimestamps, 15000);
   </script>
 </body>
 </html>

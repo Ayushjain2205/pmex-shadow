@@ -49,7 +49,7 @@
 {% if stats_stale %}
 <div class="banner banner-error">
   Size percentiles / hit rate / PnL below are stale — oldest was last computed
-  <span data-utc="{{ stalest_computed_at.isoformat() }}">{{ stalest_computed_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>.
+  <span data-utc="{{ stalest_computed_at.isoformat() }}" data-mode="relative">{{ stalest_computed_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>.
   These come from the <code>targets-recompute</code> service (<code>pmex-shadow targets recompute --schedule ...</code>),
   which runs every 15 minutes — if this banner persists, that service isn't running. Until it runs at
   least once per target, sizing's percentile curve reads size_p50..p95 as 0, which sizes every copied
@@ -72,8 +72,8 @@
       <td>{{ "%.0f%%"|format(t.hit_rate_30d * 100) if t.hit_rate_30d is not none else "—" }}</td>
       <td style="color: {{ 'inherit' if not t.pnl_30d_usd else ('#4ade80' if t.pnl_30d_usd > 0 else '#f87171') }}">{{ "$%.2f"|format(t.pnl_30d_usd) if t.pnl_30d_usd is not none else "—" }}</td>
       <td>{{ "%.0f%%"|format(t.reversal_rate * 100) if t.reversal_rate is not none else "—" }}</td>
-      <td>{% if t.last_fill_at %}<span data-utc="{{ t.last_fill_at.isoformat() }}">{{ t.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
-      <td><span data-utc="{{ t.computed_at.isoformat() }}" style="opacity:0.6;font-size:0.85rem;">{{ t.computed_at.strftime("%Y-%m-%d %H:%M") }} UTC</span></td>
+      <td>{% if t.last_fill_at %}<span data-utc="{{ t.last_fill_at.isoformat() }}" data-mode="relative">{{ t.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
+      <td><span data-utc="{{ t.computed_at.isoformat() }}" data-mode="relative" style="opacity:0.6;font-size:0.85rem;">{{ t.computed_at.strftime("%Y-%m-%d %H:%M") }} UTC</span></td>
     </tr>
     {% endfor %}
   </tbody>

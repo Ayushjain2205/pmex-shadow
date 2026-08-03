@@ -2,7 +2,6 @@
 {% block title %}Fleet — pmex-shadow{% endblock %}
 {% block content %}
 <h1>Fleet</h1>
-<div class="subtitle">All bots · click a row to open it · halt/resume from here</div>
 
 {% if message %}
 <div class="banner banner-success">{{ message }}</div>
@@ -100,8 +99,8 @@
       <td>${{ "%.2f"|format(b.deployed_usd) }}</td>
       <td style="color: {{ 'inherit' if b.today_pnl_usd == 0 else ('#4ade80' if b.today_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(b.today_pnl_usd) }}</td>
       <td style="color: {{ 'inherit' if b.total_pnl_usd == 0 else ('#4ade80' if b.total_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(b.total_pnl_usd) }}</td>
-      <td>{% if b.last_fill_at %}<span data-utc="{{ b.last_fill_at.isoformat() }}">{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
-      <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="time">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
+      <td>{% if b.last_fill_at %}<span data-utc="{{ b.last_fill_at.isoformat() }}" data-mode="relative">{{ b.last_fill_at.strftime("%Y-%m-%d %H:%M") }} UTC</span>{% else %}never{% endif %}</td>
+      <td>{% if b.heartbeat_at %}<span data-utc="{{ b.heartbeat_at.isoformat() }}" data-mode="relative">{{ b.heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}—{% endif %}</td>
       <td onclick="event.stopPropagation();">
         {% if b.archived_at %}
         <form method="post" action="/bots/{{ b.bot_id }}/unarchive" class="bot-action-form" data-action="unarchive" data-bot="{{ b.bot_id }}">
@@ -133,6 +132,18 @@
   document.querySelectorAll("tr.row-link").forEach((row) => {
     row.addEventListener("click", () => { window.location.href = row.dataset.href; });
   });
+
+  // The heartbeat and last-fill cells age live (base.html), but the status pill,
+  // P&L and exposure are frozen at render time. Left alone, a healthy bot drifts
+  // into showing a green "active" pill next to "6 min ago" — which reads exactly
+  // like the dead-bot case this page is supposed to make obvious. Refreshing keeps
+  // every number on the page from the same moment.
+  setInterval(() => {
+    if (document.hidden) return;                    // no point burning queries on a background tab
+    const el = document.activeElement;              // don't yank a filter mid-change
+    if (el && el.closest("form")) return;
+    window.location.reload();
+  }, 30000);
 
   const ACTIONS = {
     stop: {
