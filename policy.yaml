@@ -43,6 +43,24 @@ profiles:
       max_position_usd: "50"
       max_concurrent_positions: 8
       reserve_pct: "20"
+  flat_matched:
+    # `flat`, but sized to match what target_size_percentile was actually producing
+    # rather than to the round $50 — btc_copy2's copies averaged $15.53 over its first
+    # 19h, so an arm at $50 would be testing "3x the size" and "stop scaling with the
+    # target's conviction" at once and couldn't attribute the difference to either.
+    # Every other field is identical to `tight` on purpose: this is the sizing-mode
+    # arm, so sizing mode has to be the only thing that differs.
+    max_slippage_ticks: 1
+    volatility_guard: { window_s: 5, max_ticks: 2 }
+    max_fill_age_s: 5
+    sizing:
+      mode: fixed_usd
+      fixed_usd: "15"
+      min_target_size_percentile: "60"
+      min_order_usd: "5"
+      max_position_usd: "50"
+      max_concurrent_positions: 8
+      reserve_pct: "20"
 
 risk:
   global_max_exposure_usd: "5000"
