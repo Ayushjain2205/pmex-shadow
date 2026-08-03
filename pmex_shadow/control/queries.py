@@ -156,20 +156,35 @@ def _context_summary(context: dict | None) -> str | None:
 BOT_HEARTBEAT_STALE_AFTER = dt.timedelta(seconds=60)  # bots write one every 5s (watcher/heartbeat.py); 60s is generous
 
 
-async def fleet_view(conn: asyncpg.Connection) -> dict:
+FLEET_STATUSES = ("running", "halted", "stale")
+
+
+async def fleet_view(
+    conn: asyncpg.Connection,
+    mode: str | None = None,
+    status: str | None = None,
+    show_archived: bool = False,
+) -> dict:
     """Per bot: mode, watcher-relative lag, exposure vs envelope, today's PnL, skip
-    rate, last fill — the fleet-view screen (design doc §3.8)."""
+    rate, last fill — the fleet-view screen (design doc §3.8).
+
+    Archived bots are excluded unless show_archived. `mode` filters in SQL; `status`
+    can't — halted and stale are derived per row below, not columns.
+    """
     # LEFT JOIN, not INNER: an unregistered bot (config seeded by an older build,
     # registry row somehow missing) has a NULL archived_at and still shows up. A
     # missing registry row must never silently hide a bot that's trading.
     bots = await conn.fetch(
         """
-        SELECT bc.bot_id, bc.version, bc.config, bc.active
+        SELECT bc.bot_id, bc.version, bc.config, b.archived_at, b.archived_reason
         FROM bot_config bc
         LEFT JOIN bots b ON b.bot_id = bc.bot_id
-        WHERE bc.active AND b.archived_at IS NULL
+        WHERE bc.active
+          AND ($1::bool OR b.archived_at IS NULL)
+          AND ($2::text IS NULL OR bc.config->>'mode' = $2)
         ORDER BY bc.bot_id
-        """
+        """,
+        show_archived, mode or None,
     )
     archived_count = await conn.fetchval("SELECT count(*) FROM bots WHERE archived_at IS NOT NULL")
     rows = []
@@ -236,20 +251,46 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
             "last_fill_at": last_fill["at"],
             "heartbeat_at": heartbeat_at,
             "is_stale": is_stale,
+            "archived_at": b["archived_at"],
+            "archived_reason": b["archived_reason"],
         })
 
+    # Chips describe the live fleet, so archived rows never inflate them — toggling
+    # "show archived" changes what the table lists, not what the counts mean.
+    live = [r for r in rows if not r["archived_at"]]
+
+    if status:
+        rows = [r for r in rows if _matches_status(r, status)]
+
     summary = {
-        "count": len(rows),
-        "active_count": sum(1 for r in rows if not r["halted"]),
-        "halted_count": sum(1 for r in rows if r["halted"]),
-        "stale_count": sum(1 for r in rows if r["is_stale"]),
-        "live_count": sum(1 for r in rows if r["mode"] == "live"),
-        "paper_count": sum(1 for r in rows if r["mode"] == "paper"),
-        "watch_count": sum(1 for r in rows if r["mode"] == "watch"),
+        "count": len(live),
+        "shown_count": len(rows),
+        "active_count": sum(1 for r in live if not r["halted"]),
+        "halted_count": sum(1 for r in live if r["halted"]),
+        "stale_count": sum(1 for r in live if r["is_stale"]),
+        "live_count": sum(1 for r in live if r["mode"] == "live"),
+        "paper_count": sum(1 for r in live if r["mode"] == "paper"),
+        "watch_count": sum(1 for r in live if r["mode"] == "watch"),
         "archived_count": archived_count,
-        "total_today_pnl_usd": sum((r["today_pnl_usd"] for r in rows), Decimal(0)),
+        "total_today_pnl_usd": sum((r["today_pnl_usd"] for r in live), Decimal(0)),
     }
     return {"bots": rows, "summary": summary}
+
+
+def _matches_status(row: dict, status: str) -> bool:
+    """`running` means not halted and heartbeating — the fleet page's green pill
+    without the stale subtitle, i.e. what an operator means by "actually up"."""
+    if status == "archived":
+        return row["archived_at"] is not None
+    if row["archived_at"] is not None:
+        return False
+    if status == "halted":
+        return row["halted"]
+    if status == "stale":
+        return row["is_stale"] and not row["halted"]
+    if status == "running":
+        return not row["halted"] and not row["is_stale"]
+    return True
 
 
 async def _fetch_market_question(client: httpx.AsyncClient, gamma_api_base_url: str, token_id: str) -> str | None:

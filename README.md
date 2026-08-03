@@ -312,6 +312,14 @@ heartbeat" underneath it is the only hint the container is gone. Archive it:
 docker compose exec watcher pmex-shadow bot archive mybot1 --reason "superseded"
 ```
 
+The Fleet page filters by mode and status (`running` / `no heartbeat` / `halted`),
+and hides archived bots behind a **Show archived** checkbox. The summary chips always
+describe the live fleet, so archived rows never move those numbers — toggling changes
+what the table lists, not what the counts mean. Archived rows render dimmed with an
+Unarchive button in place of Stop. An **Archive** button appears inline only on a bot
+that is both stale and holding nothing, which is when it's the obvious call; the UI
+enforces the same blockers as the CLI, so it's never the lenient path.
+
 Three states that are easy to conflate:
 
 | | means | reversed by |

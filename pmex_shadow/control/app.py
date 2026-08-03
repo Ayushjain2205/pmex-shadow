@@ -75,10 +75,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(content=body, media_type="text/plain; version=0.0.4")
 
     @app.get("/")
-    async def fleet(request: Request, message: str | None = None, error: str | None = None):
+    async def fleet(
+        request: Request,
+        message: str | None = None, error: str | None = None,
+        mode: str | None = None, status: str | None = None, archived: int = 0,
+    ):
+        mode = mode if mode in ("live", "paper", "watch") else None
+        status = status if status in queries.FLEET_STATUSES or status == "archived" else None
+        # Asking for status=archived without the toggle would return nothing at all,
+        # which reads as a bug rather than a filter.
+        show_archived = bool(archived) or status == "archived"
         async with app.state.pool.acquire() as conn:
-            result = await queries.fleet_view(conn)
-        return templates.TemplateResponse(request, "fleet.html", _ctx(request, active_nav="fleet", message=message, error=error, **result))
+            result = await queries.fleet_view(conn, mode=mode, status=status, show_archived=show_archived)
+        return templates.TemplateResponse(
+            request, "fleet.html",
+            _ctx(request, active_nav="fleet", message=message, error=error,
+                 mode=mode, status=status, show_archived=show_archived, **result),
+        )
+
+    @app.post("/bots/{bot_id}/archive")
+    async def bot_archive_route(request: Request, bot_id: str, force: int = 0):
+        from urllib.parse import quote
+
+        from pmex_shadow.ops.registry import archive_blockers, archive_bot
+
+        async with app.state.pool.acquire() as conn:
+            blockers = await archive_blockers(conn, bot_id)
+            if blockers and not force:
+                # Same guardrail as the CLI, same wording — the UI must not be the
+                # lenient path to archiving a bot that's still trading.
+                return RedirectResponse(
+                    f"/?error={quote(f'{bot_id} not archived: ' + '; '.join(blockers))}", status_code=303,
+                )
+            if not await archive_bot(conn, bot_id, "archived from control UI"):
+                return RedirectResponse(f"/?error={quote(f'bot {bot_id} not found')}", status_code=303)
+        return RedirectResponse(f"/?message={quote(f'{bot_id} archived')}", status_code=303)
+
+    @app.post("/bots/{bot_id}/unarchive")
+    async def bot_unarchive_route(request: Request, bot_id: str):
+        from urllib.parse import quote
+
+        from pmex_shadow.ops.registry import unarchive_bot
+
+        async with app.state.pool.acquire() as conn:
+            if not await unarchive_bot(conn, bot_id):
+                return RedirectResponse(f"/?error={quote(f'bot {bot_id} not found')}", status_code=303)
+        return RedirectResponse(f"/?message={quote(f'{bot_id} unarchived — still stopped')}", status_code=303)
 
     @app.post("/bots/{bot_id}/halt")
     async def bot_halt(request: Request, bot_id: str):

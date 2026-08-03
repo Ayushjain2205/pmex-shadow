@@ -126,6 +126,56 @@ async def test_blockers_flag_non_terminal_positions(conn):
     assert await archive_blockers(conn, BOT) == []
 
 
+async def test_show_archived_reveals_without_inflating_the_chips(conn):
+    await archive_bot(conn, BOT, "retired in test")
+
+    hidden = await queries.fleet_view(conn)
+    assert all(b["bot_id"] != BOT for b in hidden["bots"])
+
+    shown = await queries.fleet_view(conn, show_archived=True)
+    assert any(b["bot_id"] == BOT for b in shown["bots"])
+
+    # The chips describe the live fleet either way — toggling changes the table only.
+    assert shown["summary"]["count"] == hidden["summary"]["count"]
+    assert shown["summary"]["paper_count"] == hidden["summary"]["paper_count"]
+    assert shown["summary"]["shown_count"] > hidden["summary"]["shown_count"]
+
+
+async def test_status_filter_separates_stale_from_running(conn):
+    await conn.execute(
+        "INSERT INTO heartbeats (service, at) VALUES ($1, now()) "
+        "ON CONFLICT (service) DO UPDATE SET at = now()",
+        f"bot:{BOT}",
+    )
+    running = await queries.fleet_view(conn, status="running")
+    assert any(b["bot_id"] == BOT for b in running["bots"])
+    stale = await queries.fleet_view(conn, status="stale")
+    assert all(b["bot_id"] != BOT for b in stale["bots"])
+
+    await conn.execute(
+        "UPDATE heartbeats SET at = $2 WHERE service = $1",
+        f"bot:{BOT}", dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2),
+    )
+    assert any(b["bot_id"] == BOT for b in (await queries.fleet_view(conn, status="stale"))["bots"])
+    assert all(b["bot_id"] != BOT for b in (await queries.fleet_view(conn, status="running"))["bots"])
+
+
+async def test_mode_filter(conn):
+    assert any(b["bot_id"] == BOT for b in (await queries.fleet_view(conn, mode="paper"))["bots"])
+    assert all(b["bot_id"] != BOT for b in (await queries.fleet_view(conn, mode="live"))["bots"])
+
+
+async def test_status_filters_exclude_archived_unless_asked(conn):
+    """An archived bot is not "stale" or "running" — those describe the live fleet."""
+    await archive_bot(conn, BOT, "retired in test")
+    for st in ("running", "stale", "halted"):
+        view = await queries.fleet_view(conn, status=st, show_archived=True)
+        assert all(b["bot_id"] != BOT for b in view["bots"]), st
+
+    view = await queries.fleet_view(conn, status="archived", show_archived=True)
+    assert any(b["bot_id"] == BOT for b in view["bots"])
+
+
 async def test_archive_unknown_bot_reports_failure(conn):
     assert not await archive_bot(conn, "no_such_bot_exists")
     assert not await unarchive_bot(conn, "no_such_bot_exists")
