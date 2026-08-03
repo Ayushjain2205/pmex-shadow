@@ -62,14 +62,38 @@
   "voided": "Voided", "refunded": "Refunded",
 } %}
 <div class="card">
+  <h3>By wallet</h3>
+  {% if not by_wallet %}<p>Nothing copied yet.</p>{% else %}
+  <table>
+    <thead><tr><th>Wallet</th><th>Positions</th><th>Closed</th><th>Win rate</th><th>Avg entry</th><th>Realized PnL</th><th>ROI</th></tr></thead>
+    <tbody>
+      {% for w in by_wallet %}
+      <tr>
+        <td><span class="pill pill-wallet-{{ wallet_colours.get(w.wallet, 0) }}">{{ w.wallet }}</span></td>
+        <td>{{ w.positions }}</td>
+        <td>{{ w.closed }}</td>
+        <td>{{ "%.0f%%"|format(w.win_rate * 100) if w.win_rate is not none else "—" }}</td>
+        <td>{{ "$%.3f"|format(w.avg_entry) if w.avg_entry is not none else "—" }}</td>
+        <td style="color: {{ 'inherit' if w.pnl == 0 else ('#4ade80' if w.pnl > 0 else '#f87171') }}">{{ "%+.2f"|format(w.pnl) }}</td>
+        <td style="color: {{ 'inherit' if w.roi is none or w.roi == 0 else ('#4ade80' if w.roi > 0 else '#f87171') }}">{{ "%+.1f%%"|format(w.roi * 100) if w.roi is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p style="font-size:0.8rem;opacity:0.65;margin-top:0.6rem;">Attributed to the wallet whose fill opened the position. Avg entry covers all positions; win rate and ROI only closed ones.</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h3>Positions</h3>
   {% if not positions %}<p>No positions.</p>{% else %}
   <table>
-    <thead><tr><th>Market</th><th>Shares</th><th>Bought at</th><th>Sold at</th><th>Cost basis</th><th>Realized PnL</th><th>Result</th></tr></thead>
+    <thead><tr><th>Market</th><th>Copied from</th><th>Shares</th><th>Bought at</th><th>Sold at</th><th>Cost basis</th><th>Realized PnL</th><th>Result</th></tr></thead>
     <tbody>
       {% for p in positions %}
       <tr>
         <td>{% if p.market_title %}{{ p.market_title }}{% else %}<code>{{ p.token_id[:16] }}…</code>{% endif %}</td>
+        <td>{% if p.targets %}{% for t in p.targets %}<span class="pill pill-wallet-{{ wallet_colours.get(t, 0) }}">{{ t }}</span>{% if not loop.last %} {% endif %}{% endfor %}{% else %}—{% endif %}</td>
         <td>{{ "%.4f"|format(p.shares) }}</td>
         <td>{{ "$%.3f"|format(p.entry_price) if p.entry_price is not none else "—" }}</td>
         <td>{{ "$%.3f"|format(p.exit_price) if p.exit_price is not none else "—" }}</td>
@@ -102,12 +126,13 @@
   <h3>Recent decisions</h3>
   {% if not recent_intents %}<p>No decisions yet.</p>{% else %}
   <table>
-    <thead><tr><th>Decision</th><th>Market</th><th>Fill</th><th>Result</th><th>At</th></tr></thead>
+    <thead><tr><th>Decision</th><th>Market</th><th>Copied from</th><th>Fill</th><th>Result</th><th>At</th></tr></thead>
     <tbody>
       {% for i in recent_intents %}
       <tr>
         <td><span class="pill pill-{{ i.decision }}">{{ i.decision }}</span></td>
         <td>{% if i.market_title %}{{ i.market_title }}{% else %}<code>{{ i.token_id[:12] }}…</code>{% endif %}</td>
+        <td>{% if i.target_alias %}<span class="pill pill-wallet-{{ wallet_colours.get(i.target_alias, 0) }}">{{ i.target_alias }}</span>{% else %}—{% endif %}</td>
         <td>{{ i.side }} @ {{ i.target_price }}</td>
         <td>
           {% if i.decision == "SKIP" %}

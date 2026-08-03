@@ -69,6 +69,16 @@
     .pill-watch { background: color-mix(in srgb, #64748b 28%, transparent); color: #94a3b8; }
     .pill-stale { background: color-mix(in srgb, #ef4444 30%, transparent); color: #f87171; }
     .pill-archived { background: color-mix(in srgb, var(--text-muted) 18%, transparent); color: var(--text-muted); }
+    /* Wallet pills (queries.wallet_pill picks the slot). Deliberately no green or
+       red: those read as win/loss everywhere else on the bot page, and a wallet
+       colour carries no verdict. Hues repeat across other pill families, which is
+       fine — the meaning is scoped to its column. */
+    .pill-wallet-0 { background: color-mix(in srgb, #6366f1 30%, transparent); color: #818cf8; }
+    .pill-wallet-1 { background: color-mix(in srgb, #06b6d4 30%, transparent); color: #22d3ee; }
+    .pill-wallet-2 { background: color-mix(in srgb, #ec4899 30%, transparent); color: #f472b6; }
+    .pill-wallet-3 { background: color-mix(in srgb, #14b8a6 30%, transparent); color: #2dd4bf; }
+    .pill-wallet-4 { background: color-mix(in srgb, #a855f7 30%, transparent); color: #c084fc; }
+    .pill-wallet-5 { background: color-mix(in srgb, #f59e0b 30%, transparent); color: #fbbf24; }
     /* Recedes without hiding: an archived row is context, not something you act on. */
     .row-archived td { opacity: 0.55; }
     .row-archived:hover td { opacity: 0.85; }

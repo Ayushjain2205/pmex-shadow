@@ -14,6 +14,26 @@ import asyncpg
 import httpx
 
 
+WALLET_PILL_COLOURS = 6
+
+
+def assign_wallet_colours(aliases) -> dict[str, int]:
+    """Colour slot per wallet pill. The only requirement is that two wallets visible
+    together never share a colour, so slots are handed out by enumeration over the
+    sorted aliases — nothing cleverer earns its keep here.
+
+    Hashing the alias was the obvious first move and is worse: crc32 maps both
+    btc_test2 and btc_test3 into the same slot, so the two wallets accounting for
+    nearly every row would have rendered identically — precisely what the pills exist
+    to tell apart. Hashing only buys a colour that survives across pages and restarts,
+    which nothing depends on.
+
+    Past WALLET_PILL_COLOURS wallets the slots wrap and colours repeat; the pill text
+    still names each wallet.
+    """
+    return {alias: i % WALLET_PILL_COLOURS for i, alias in enumerate(sorted(set(aliases)))}
+
+
 def _jsonb(value):
     """asyncpg returns JSONB columns as raw text, not a decoded object, without an
     explicit type codec registered on the connection — found the hard way (a live
@@ -384,26 +404,92 @@ async def bot_detail(
             FROM orders
             WHERE bot_id = $1 AND side = 'BUY' AND filled_shares > 0 AND avg_fill_price IS NOT NULL
             GROUP BY token_id, mode
+        ), copied_from AS (
+            -- Which wallet(s) this position was opened off. A position has no fill_id
+            -- of its own, so attribution goes back through the COPY intents on the
+            -- token. Aggregated rather than picked because two targets trading the
+            -- same token is rare but real (one token in the data when this was
+            -- written): a plain join would silently duplicate the position row and
+            -- double it in every column on the page.
+            SELECT i.token_id, i.mode,
+                   array_agg(DISTINCT COALESCE(ts.alias, left(f.target, 10) || '…')) AS targets
+            FROM intents i
+            JOIN target_fills f ON f.id = i.fill_id
+            LEFT JOIN target_stats ts ON ts.target = f.target
+            WHERE i.bot_id = $1 AND i.decision = 'COPY'
+            GROUP BY i.token_id, i.mode
         )
         SELECT p.token_id, p.shares, p.cost_basis_usd, p.realized_pnl_usd, p.lifecycle,
                b.notional / NULLIF(b.shares, 0) AS entry_price,
                CASE WHEN p.lifecycle IN ('redeemed', 'refunded', 'written_off')
                     THEN round((b.notional + p.realized_pnl_usd) / NULLIF(b.shares, 0), 4)
-               END AS exit_price
+               END AS exit_price,
+               cf.targets
         FROM positions p
         LEFT JOIN buys b ON b.token_id = p.token_id AND b.mode = p.mode
+        LEFT JOIN copied_from cf ON cf.token_id = p.token_id AND cf.mode = p.mode
         WHERE p.bot_id = $1 ORDER BY p.last_event_at DESC LIMIT $2 OFFSET $3
         """,
         bot_id, pos_pg["page_size"], pos_pg["offset"],
     )]
+
+    # "By wallet": which targets are actually paying. Attribution is to the wallet
+    # whose fill *opened* the position (earliest COPY intent on the token), not to
+    # every wallet that touched it — a position's PnL is one number and splitting it
+    # across contributors would need a cost allocation this page has no basis for.
+    # Multi-wallet tokens are rare (one in the data when this was written), so the two
+    # readings barely differ; the per-position table above still shows every one.
+    by_wallet = [dict(r) for r in await conn.fetch(
+        """
+        WITH buys AS (
+            SELECT token_id, mode,
+                   sum(filled_shares) AS shares,
+                   sum(filled_shares * avg_fill_price) AS notional
+            FROM orders
+            WHERE bot_id = $1 AND side = 'BUY' AND filled_shares > 0 AND avg_fill_price IS NOT NULL
+            GROUP BY token_id, mode
+        ), opened_by AS (
+            SELECT DISTINCT ON (i.token_id, i.mode) i.token_id, i.mode,
+                   COALESCE(ts.alias, left(f.target, 10) || '…') AS wallet
+            FROM intents i
+            JOIN target_fills f ON f.id = i.fill_id
+            LEFT JOIN target_stats ts ON ts.target = f.target
+            WHERE i.bot_id = $1 AND i.decision = 'COPY'
+            ORDER BY i.token_id, i.mode, i.created_at
+        ), closed AS (
+            SELECT o.wallet, p.lifecycle, p.realized_pnl_usd, b.notional, b.shares
+            FROM positions p
+            JOIN opened_by o ON o.token_id = p.token_id AND o.mode = p.mode
+            LEFT JOIN buys b ON b.token_id = p.token_id AND b.mode = p.mode
+            WHERE p.bot_id = $1
+        )
+        SELECT wallet,
+               count(*) AS positions,
+               count(*) FILTER (WHERE lifecycle IN ('redeemed', 'refunded', 'written_off')) AS closed,
+               count(*) FILTER (WHERE lifecycle = 'redeemed') AS wins,
+               avg(notional / NULLIF(shares, 0)) AS avg_entry,
+               sum(realized_pnl_usd) AS pnl,
+               sum(realized_pnl_usd) / NULLIF(
+                   sum(notional) FILTER (WHERE lifecycle IN ('redeemed', 'refunded', 'written_off')), 0
+               ) AS roi
+        FROM closed GROUP BY wallet ORDER BY sum(realized_pnl_usd)
+        """,
+        bot_id,
+    )]
+    for w in by_wallet:
+        w["win_rate"] = (w["wins"] / w["closed"]) if w["closed"] else None
 
     dec_total = await conn.fetchval("SELECT count(*) FROM intents WHERE bot_id = $1", bot_id)
     dec_pg = _page_info(dec_page, DECISIONS_PAGE_SIZE, dec_total)
     recent_intents = [dict(r) for r in await conn.fetch(
         """
         SELECT i.decision, i.skip_reason, i.skip_detail, i.token_id, i.side, i.target_price, i.intended_price,
-               i.intended_shares, i.target_percentile, i.created_at
-        FROM intents i WHERE i.bot_id = $1 ORDER BY i.created_at DESC LIMIT $2 OFFSET $3
+               i.intended_shares, i.target_percentile, i.created_at,
+               COALESCE(ts.alias, left(f.target, 10) || '…') AS target_alias
+        FROM intents i
+        JOIN target_fills f ON f.id = i.fill_id
+        LEFT JOIN target_stats ts ON ts.target = f.target
+        WHERE i.bot_id = $1 ORDER BY i.created_at DESC LIMIT $2 OFFSET $3
         """,
         bot_id, dec_pg["page_size"], dec_pg["offset"],
     )]
@@ -422,6 +508,14 @@ async def bot_detail(
     for s in skips_by_reason:
         s["skip_label"] = _skip_label(s["skip_reason"])
         s["skip_category"] = _skip_category(s["skip_reason"])
+
+    # Assigned over every wallet named anywhere on the page rather than per table, so
+    # one wallet reads the same colour in the summary card and in the rows beneath it.
+    wallet_aliases: set[str] = {w["wallet"] for w in by_wallet}
+    for p in positions:
+        wallet_aliases.update(p["targets"] or [])
+    wallet_aliases.update(i["target_alias"] for i in recent_intents if i["target_alias"])
+    wallet_colours = assign_wallet_colours(wallet_aliases)
     equity_curve = await conn.fetch(
         """
         SELECT bucket, sum(pnl) OVER (ORDER BY bucket) AS cumulative_pnl
@@ -468,6 +562,8 @@ async def bot_detail(
 
     return {
         "positions": positions,
+        "by_wallet": by_wallet,
+        "wallet_colours": wallet_colours,
         "recent_intents": recent_intents,
         "skips_by_reason": skips_by_reason,
         "equity_curve": equity_curve,
