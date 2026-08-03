@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pmex_shadow.models import MATCH_ATTRIBUTES
@@ -70,6 +70,21 @@ class MatchValue:
         assert self.pattern is not None
         return f"re:{self.pattern.pattern}"
 
+    def to_config(self) -> Any:
+        """The value as it would be written in YAML — the inverse of `_match_value`.
+
+        Needed because a validated BotConfig gets `model_dump`ed straight into the
+        `bot_config` table (config_write.seed_initial_config). Without this, pydantic
+        serializes this dataclass's own fields, and the round trip back through
+        validation fails on a shape no config author ever wrote. A single literal
+        serializes as a scalar rather than a one-element list, matching both how
+        rules are written by hand and what's already stored for existing bots.
+        """
+        if self.literals is not None:
+            return sorted(self.literals)[0] if len(self.literals) == 1 else sorted(self.literals)
+        assert self.pattern is not None
+        return {"re": self.pattern.pattern}
+
 
 def _match_value(key: str, raw: Any) -> MatchValue:
     if isinstance(raw, dict):
@@ -115,6 +130,13 @@ class MatchRule(RootModel[dict[str, MatchValue]]):
                 f"known attributes are {sorted(MATCH_ATTRIBUTES)}"
             )
         return {key: _match_value(key, value) for key, value in raw.items()}
+
+    @model_serializer
+    def _serialize(self) -> dict[str, Any]:
+        """Round-trip back to the authored form, not this model's internals — a
+        BotConfig is model_dump()ed into the bot_config table and re-validated on
+        every bot start and hot-reload."""
+        return {key: value.to_config() for key, value in self.root.items()}
 
     def describe(self) -> dict[str, str]:
         """Human-readable form of the rule, for skip_detail."""

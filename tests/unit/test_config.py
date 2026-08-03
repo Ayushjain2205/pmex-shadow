@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pmex_shadow.config import ConfigError, SelectorsConfig, load_bot_config, load_policy_file
+from pmex_shadow.config import BotConfig, ConfigError, SelectorsConfig, load_bot_config, load_policy_file
 
 
 def _write(tmp_path: Path, name: str, content: str) -> Path:
@@ -236,3 +236,23 @@ def test_setting_event_ids_is_a_load_error():
     original bug — believing you'd scoped a bot when you hadn't."""
     with pytest.raises(Exception, match="never been implemented"):
         SelectorsConfig.model_validate({"event_ids": ["788072"]})
+
+
+def test_match_rules_round_trip_through_model_dump():
+    """A validated BotConfig is model_dump()ed straight into the bot_config table
+    (config_write.seed_initial_config) and re-validated on every start and
+    hot-reload. Without an explicit serializer pydantic emits MatchValue's own
+    fields — {'pattern': None, 'literals': [...]} — which then fails validation as a
+    shape no config author ever wrote, so a bot with any rule cannot start. Caught by
+    a crash-looping container, not by the suite."""
+    raw = {
+        "name": "rt", "mode": "paper", "wallet": {"funder_env": "F", "pk_env": "P"},
+        "selectors": {"deny": [{"asset": "sol"}, {"tag": ["a", "b"]}, {"slug": {"re": "sol-.*"}}]},
+        "targets": ["t"], "policy": {"profile": "tight"}, "risk": {"envelope_usd": "500"},
+    }
+    dumped = BotConfig.model_validate(raw).model_dump(mode="json")
+    assert dumped["selectors"]["deny"] == [{"asset": "sol"}, {"tag": ["a", "b"]}, {"slug": {"re": "sol-.*"}}]
+
+    # Must survive re-validation, and dumping again must be stable — a bot re-dumps
+    # its own config on every version write, so drift would compound.
+    assert BotConfig.model_validate(dumped).model_dump(mode="json") == dumped
