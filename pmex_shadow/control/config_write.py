@@ -38,6 +38,13 @@ async def seed_initial_config(conn: asyncpg.Connection, bot: BotConfig) -> None:
     """Rule 1: bots/<name>.yaml seeds the initial DB row, once. A no-op if this bot
     already has an active version — the DB is authoritative from then on, the YAML
     is not re-read on every start."""
+    from pmex_shadow.ops.registry import register_bot
+
+    # Registration is unconditional, unlike the config seed below: a bot that
+    # already has config from before the bots table existed still needs its
+    # registry row, and register_bot won't un-archive a retired one.
+    await register_bot(conn, bot.name)
+
     existing = await get_active_config(conn, bot.name)
     if existing is not None:
         return

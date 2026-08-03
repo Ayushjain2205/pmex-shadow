@@ -159,14 +159,19 @@ BOT_HEARTBEAT_STALE_AFTER = dt.timedelta(seconds=60)  # bots write one every 5s 
 async def fleet_view(conn: asyncpg.Connection) -> dict:
     """Per bot: mode, watcher-relative lag, exposure vs envelope, today's PnL, skip
     rate, last fill — the fleet-view screen (design doc §3.8)."""
+    # LEFT JOIN, not INNER: an unregistered bot (config seeded by an older build,
+    # registry row somehow missing) has a NULL archived_at and still shows up. A
+    # missing registry row must never silently hide a bot that's trading.
     bots = await conn.fetch(
         """
         SELECT bc.bot_id, bc.version, bc.config, bc.active
         FROM bot_config bc
-        WHERE bc.active
+        LEFT JOIN bots b ON b.bot_id = bc.bot_id
+        WHERE bc.active AND b.archived_at IS NULL
         ORDER BY bc.bot_id
         """
     )
+    archived_count = await conn.fetchval("SELECT count(*) FROM bots WHERE archived_at IS NOT NULL")
     rows = []
     for b in bots:
         bot_id = b["bot_id"]
@@ -241,6 +246,7 @@ async def fleet_view(conn: asyncpg.Connection) -> dict:
         "live_count": sum(1 for r in rows if r["mode"] == "live"),
         "paper_count": sum(1 for r in rows if r["mode"] == "paper"),
         "watch_count": sum(1 for r in rows if r["mode"] == "watch"),
+        "archived_count": archived_count,
         "total_today_pnl_usd": sum((r["today_pnl_usd"] for r in rows), Decimal(0)),
     }
     return {"bots": rows, "summary": summary}
@@ -396,11 +402,22 @@ async def bot_detail(
         "closed_trades": closed_trades,
         "win_rate": (summary["wins"] / closed_trades) if closed_trades > 0 else None,
         "pos_pg": pos_pg, "dec_pg": dec_pg, "log_pg": log_pg,
+        "archived": await conn.fetchrow(
+            "SELECT archived_at, archived_reason FROM bots WHERE bot_id = $1 AND archived_at IS NOT NULL", bot_id,
+        ),
     }
 
 
 async def list_bot_ids(conn: asyncpg.Connection) -> list[str]:
-    rows = await conn.fetch("SELECT bot_id FROM bot_config WHERE active ORDER BY bot_id")
+    """Bots a target can be attached to — archived ones excluded, since attaching
+    new work to a retired bot is never intended. This does not affect reachability
+    of archived bots: /logs and /bots/<id> address them by bot_id directly rather
+    than picking from this list.
+    """
+    rows = await conn.fetch(
+        "SELECT bc.bot_id FROM bot_config bc LEFT JOIN bots b ON b.bot_id = bc.bot_id "
+        "WHERE bc.active AND b.archived_at IS NULL ORDER BY bc.bot_id"
+    )
     return [r["bot_id"] for r in rows]
 
 

@@ -737,6 +737,105 @@ def bot_resume(name: str) -> None:
     typer.secho(f"resumed {name}", fg=typer.colors.GREEN)
 
 
+@bot_app.command("archive")
+def bot_archive(
+    name: str,
+    reason: str | None = typer.Option(None, "--reason", help="why it was retired — shown in `bot list`"),
+    force: bool = typer.Option(False, "--force", help="archive despite blockers (running, or open positions)"),
+) -> None:
+    """Retire a bot from the fleet view without deleting anything.
+
+    History stays queryable and the bot stays selectable in the Logs/Analysis
+    filters — this only stops it being presented as something you operate. It is
+    not a halt (see `panic`/`bot resume`) and not a delete; `bot unarchive`
+    reverses it. Stop the container separately: nothing here kills a process.
+    """
+    import asyncpg
+
+    from pmex_shadow.ops.registry import archive_blockers, archive_bot
+
+    settings = Settings()
+
+    async def _archive():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            blockers = await archive_blockers(conn, name)
+            if blockers and not force:
+                return None, blockers
+            return await archive_bot(conn, name, reason), blockers
+        finally:
+            await conn.close()
+
+    archived, blockers = asyncio.run(_archive())
+
+    if archived is None:
+        typer.secho(f"refusing to archive {name}:", fg=typer.colors.RED)
+        for b in blockers:
+            typer.echo(f"  - {b}")
+        typer.echo("Archiving is a presentation change, not a stop — halt or drain it first, or pass --force.")
+        raise typer.Exit(code=1)
+    if not archived:
+        typer.secho(f"unknown bot '{name}' — not in the bots registry", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    for b in blockers:
+        typer.secho(f"  forced past: {b}", fg=typer.colors.YELLOW)
+    typer.secho(f"archived {name}", fg=typer.colors.GREEN)
+    typer.echo("Its history is unchanged and still reachable at /bots/" + name + ".")
+
+
+@bot_app.command("unarchive")
+def bot_unarchive(name: str) -> None:
+    """Return an archived bot to the fleet view. Does not start it."""
+    import asyncpg
+
+    from pmex_shadow.ops.registry import unarchive_bot
+
+    settings = Settings()
+
+    async def _unarchive():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            return await unarchive_bot(conn, name)
+        finally:
+            await conn.close()
+
+    if not asyncio.run(_unarchive()):
+        typer.secho(f"unknown bot '{name}' — not in the bots registry", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho(f"unarchived {name} — still stopped; `bot run {name}` to start it", fg=typer.colors.GREEN)
+
+
+@bot_app.command("list")
+def bot_list() -> None:
+    """Every registered bot, archived included — unlike the fleet view."""
+    import asyncpg
+
+    from pmex_shadow.ops.registry import list_bots
+
+    settings = Settings()
+
+    async def _list():
+        conn = await asyncpg.connect(settings.database_url)
+        try:
+            return await list_bots(conn)
+        finally:
+            await conn.close()
+
+    bots = asyncio.run(_list())
+    if not bots:
+        typer.echo("no bots registered")
+        return
+    for b in bots:
+        if b["archived_at"]:
+            detail = f"archived {b['archived_at']:%Y-%m-%d}"
+            if b["archived_reason"]:
+                detail += f" — {b['archived_reason']}"
+            typer.secho(f"  {b['bot_id']:24} {detail}", fg=typer.colors.BRIGHT_BLACK)
+        else:
+            typer.echo(f"  {b['bot_id']:24} active")
+
+
 @app.command()
 def panic(
     bot: str | None = typer.Option(None, "--bot", help="halt only this bot; omit for all"),

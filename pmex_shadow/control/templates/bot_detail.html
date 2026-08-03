@@ -16,6 +16,13 @@
 {% endmacro %}
 <p><a href="/">← Fleet</a></p>
 <h1>{{ bot_id }} <a href="/bots/{{ bot_id }}/params" class="button" style="font-size: 0.9rem;">params →</a></h1>
+{% if archived %}
+<div class="banner banner-muted">
+  Archived {{ archived.archived_at.strftime("%Y-%m-%d") }}{% if archived.archived_reason %} — {{ archived.archived_reason }}{% endif %}.
+  Not on the Fleet page and not accepting new targets; everything below is retained.
+  <code>pmex-shadow bot unarchive {{ bot_id }}</code> restores it.
+</div>
+{% endif %}
 
 <div class="card">
   <div class="stat-row">

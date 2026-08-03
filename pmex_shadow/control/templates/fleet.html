@@ -12,7 +12,12 @@
 {% endif %}
 
 {% if not bots %}
+{% if summary.archived_count %}
+<p>No active bots — {{ summary.archived_count }} archived. Their history is still on each bot's page and in the Logs/Analysis filters;
+  <code>pmex-shadow bot unarchive &lt;name&gt;</code> brings one back.</p>
+{% else %}
 <p>No bots configured yet. Run <code>pmex-shadow bot new &lt;name&gt;</code> and start it with <code>pmex-shadow bot run &lt;name&gt;</code>.</p>
+{% endif %}
 {% else %}
 <div class="card">
   <div class="chip-row">
@@ -23,6 +28,7 @@
     <span class="chip"><span class="chip-dot chip-dot-amber"></span><strong>{{ summary.live_count }}</strong> live</span>
     <span class="chip"><span class="chip-dot chip-dot-blue"></span><strong>{{ summary.paper_count }}</strong> paper</span>
     <span class="chip"><span class="chip-dot chip-dot-gray"></span><strong>{{ summary.watch_count }}</strong> watch</span>
+    {% if summary.archived_count %}<span class="chip"><span class="chip-dot chip-dot-gray"></span><strong>{{ summary.archived_count }}</strong> archived</span>{% endif %}
     <span class="chip">Today's P&amp;L (fleet)
       <strong style="color: {{ 'inherit' if summary.total_today_pnl_usd == 0 else ('#4ade80' if summary.total_today_pnl_usd > 0 else '#f87171') }}">{{ "%+.2f"|format(summary.total_today_pnl_usd) }}</strong>
     </span>

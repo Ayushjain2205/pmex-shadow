@@ -302,6 +302,31 @@ the target list all hot-reload (FR-C-5). Non-reloadable fields render disabled i
 The dashboard is **read-only** until you set `PMEX_CONTROL_ALLOW_WRITES=1` in `.env`
 (FR-C-8). The port is `PMEX_CONTROL_HOST_PORT`, bound to `127.0.0.1` only.
 
+### Retiring a bot
+
+A bot you've stopped still shows on the Fleet page as `active` with a Stop button —
+the status pill reflects DB config, not whether a process exists, so "no recent
+heartbeat" underneath it is the only hint the container is gone. Archive it:
+
+```bash
+docker compose exec watcher pmex-shadow bot archive mybot1 --reason "superseded"
+```
+
+Three states that are easy to conflate:
+
+| | means | reversed by |
+|---|---|---|
+| `bot_config.active` | which config **version** is current — never "running" | writing a new version |
+| halted | paused, refuses to trade (reconcile drift or killswitch) | `bot resume` |
+| archived | retired from the fleet view | `bot unarchive` |
+
+Archiving deletes nothing and stops nothing. Positions, intents and logs stay
+queryable, `/bots/<name>` and `/logs?bot_id=<name>` keep working, and the bot keeps
+its active config version — it just stops being presented as something you operate,
+and stops being offered as somewhere to attach new targets. It refuses if the bot is
+still heartbeating or holds non-terminal positions, unless you pass `--force`. Stop
+the container separately; archiving is a presentation change, not a kill.
+
 ---
 
 ## Troubleshooting
@@ -316,6 +341,7 @@ The dashboard is **read-only** until you set `PMEX_CONTROL_ALLOW_WRITES=1` in `.
 | Skips say `below_min_order` | Sized notional fell under `min_order_usd` | Raise `base_unit_usd`, or accept it — it never rounds up (FR-P-6) |
 | Backfill fails after an outage | Free public RPC rejects `eth_getLogs` | Use a real provider — [notes below](#rpc-provider-notes) |
 | Bot halted itself, refuses to trade | Reconcile drift or killswitch | Investigate first, then `pmex-shadow bot resume <name>` — always explicit |
+| Stopped bot still listed `active` with a Stop button | Fleet status is config state, not process state — "no recent heartbeat" is the real signal | `pmex-shadow bot archive <name>` — [see above](#retiring-a-bot) |
 | `compose generate` output does nothing | Ran it inside a container | Run it on the **host** — [see below](#running-bots-as-services) |
 
 Whatever the symptom, run `pmex-shadow doctor` first — it checks RPC reachability and
@@ -390,6 +416,10 @@ pmex-shadow bot new <name> [--import | --private-key-env VAR]
 pmex-shadow bot run <name> [--live] consume fills, decide, execute (paper or, deliberately, live)
 pmex-shadow bot resume <name>       clear a halt (reconcile drift or killswitch)
 pmex-shadow bot overlap             bots sharing targets + selectors, combined exposure
+pmex-shadow bot list                every registered bot, archived included
+pmex-shadow bot archive <name> [--reason TEXT] [--force]
+                                    retire from the fleet view; keeps all history, reversible
+pmex-shadow bot unarchive <name>    return to the fleet view (does not start it)
 
 pmex-shadow targets add <addr> [--alias NAME]
 pmex-shadow targets list|pause|resume|migrate

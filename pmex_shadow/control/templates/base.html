@@ -91,6 +91,8 @@
     .banner-readonly { background: color-mix(in srgb, #f97316 12%, var(--card-bg)); border-color: color-mix(in srgb, #f97316 40%, transparent); }
     .banner-error { background: color-mix(in srgb, #ef4444 12%, var(--card-bg)); border-color: color-mix(in srgb, #ef4444 40%, transparent); }
     .banner-success { background: color-mix(in srgb, #22c55e 12%, var(--card-bg)); border-color: color-mix(in srgb, #22c55e 40%, transparent); }
+    /* Archived is a neutral state, not a fault — deliberately not red/orange. */
+    .banner-muted { background: var(--bg-1); border-color: var(--card-border); color: var(--text-muted); }
     input, select { font: inherit; padding: 0.35rem 0.5rem; border-radius: 6px; border: 1px solid var(--card-border); background: var(--bg-1); color: var(--text); }
     input:disabled { opacity: 0.5; }
     label { display: block; font-size: 0.8rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
