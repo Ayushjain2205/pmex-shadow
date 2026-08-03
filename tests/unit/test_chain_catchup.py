@@ -52,7 +52,7 @@ async def run_ticks(rpc, conn, n, interval_s=0.001, targets={"0xabc"}):
     """Run the loop for n ticks, then cancel it the way _subscribe_once does."""
     chain._rpc = rpc
     task = asyncio.create_task(
-        chain._catch_up_loop(None, "http://rpc", conn, targets, chunk_blocks=2000, interval_s=interval_s)
+        chain._catch_up_loop(None, "http://rpc", conn, targets, chain.RangeCap(2000), interval_s=interval_s)
     )
     await asyncio.sleep(interval_s * n + 0.05)
     task.cancel()

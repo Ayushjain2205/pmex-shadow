@@ -95,6 +95,52 @@ async def _rpc(client: httpx.AsyncClient, http_url: str, method: str, params: li
     return data["result"]
 
 
+_RANGE_ERROR_HINTS = (
+    "block range",
+    "query returned more than",
+    "response size exceeded",
+    "too many results",
+)
+
+
+def _is_range_error(exc: Exception) -> bool:
+    """Is the provider rejecting the *size* of the range, or failing for an unrelated
+    reason? Only load-bearing because the learned cap now persists (see RangeCap):
+    shrinking on a transient 429 or a 5xx would pin the watcher at the floor for the
+    life of the process, where the old reset-every-call behaviour made that mistake
+    self-healing. Alchemy reports an oversized range as HTTP 400 or JSON-RPC -32000
+    "invalid block range params"; rate limits are 429 and server faults are 5xx, and
+    shrinking helps neither."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 400
+    return any(hint in str(exc).lower() for hint in _RANGE_ERROR_HINTS)
+
+
+class RangeCap:
+    """The provider's real eth_getLogs range cap, probed once and then remembered.
+
+    Shared mutable state rather than a return value because backfill() raises once it
+    has nothing left to shrink, and the shrinking it already paid for has to outlive
+    that raise. One instance is threaded down from run_chain_watcher so it also
+    survives reconnects — previously `chunk` was a local re-seeded from chunk_blocks
+    on every call, so each backfill re-walked 2000 -> 1000 -> ... -> 10 and spent 8
+    rejected round-trips before its first useful request, on exactly the recovery path
+    that is already behind.
+
+    It deliberately never grows back: re-probing upward would reintroduce a rejection
+    every time it tried. A provider change is a restart, and a restart re-probes."""
+
+    def __init__(self, initial: int, floor: int = 10) -> None:
+        self.value = initial
+        self.floor = floor
+
+    def shrink(self) -> bool:
+        if self.value <= self.floor:
+            return False
+        self.value = max(self.value // 2, self.floor)
+        return True
+
+
 async def backfill(
     client: httpx.AsyncClient,
     http_url: str,
@@ -102,23 +148,24 @@ async def backfill(
     targets: set[str],
     from_block: int,
     to_block: int,
-    chunk_blocks: int,
+    cap: RangeCap,
 ) -> None:
     """Chunked eth_getLogs over [from_block, to_block] inclusive (FR-W-4). Shrinks the
     chunk on an oversized-range error rather than trusting a fixed cap (docs/VERIFIED.md
     item 11 — the real cap is provider-specific; item 15 — Alchemy's free tier
     specifically caps eth_getLogs at 10 blocks, confirmed from the actual error body,
     which is why the shrink floor here is 10 and not something more conservative-looking
-    like 50 — 50 was still too high and left the watcher stuck retrying forever)."""
+    like 50 — 50 was still too high and left the watcher stuck retrying forever). The
+    shrink is remembered by `cap` across calls, so the probe costs once per process
+    rather than once per backfill."""
     if not targets:
         return
     maker_topics = [_address_to_topic(t) for t in targets]
     block_ts_cache: dict[int, dt.datetime] = {}
     start = from_block
-    chunk = chunk_blocks
 
     while start <= to_block:
-        end = min(start + chunk - 1, to_block)
+        end = min(start + cap.value - 1, to_block)
         try:
             logs = await _rpc(
                 client, http_url, "eth_getLogs",
@@ -130,9 +177,8 @@ async def backfill(
                 }],
             )
         except (RuntimeError, httpx.HTTPStatusError) as exc:
-            if chunk > 10:
-                chunk = max(chunk // 2, 10)
-                logger.warning("eth_getLogs range rejected (%s), shrinking chunk to %d blocks", exc, chunk)
+            if _is_range_error(exc) and cap.shrink():
+                logger.warning("eth_getLogs range rejected (%s), shrinking chunk to %d blocks", exc, cap.value)
                 continue
             raise
 
@@ -183,7 +229,7 @@ async def _catch_up_loop(
     http_url: str,
     conn: asyncpg.Connection,
     targets: set[str],
-    chunk_blocks: int,
+    cap: RangeCap,
     interval_s: float,
 ) -> None:
     """Poll eth_getLogs from the cursor to head, continuously, alongside the live
@@ -216,7 +262,7 @@ async def _catch_up_loop(
                 continue
             # cursor is inclusive-covered, so resume at the next block — at this
             # cadence the range is normally one or two blocks.
-            await backfill(client, http_url, conn, targets, cursor + 1, head, chunk_blocks)
+            await backfill(client, http_url, conn, targets, cursor + 1, head, cap)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -226,7 +272,7 @@ async def _catch_up_loop(
             logger.exception("catch-up poll failed, retrying in %.1fs", interval_s)
 
 
-async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets_conn: asyncpg.Connection, sub_conn: asyncpg.Connection, poll_conn: asyncpg.Connection, chunk_blocks: int, catchup_interval_s: float) -> None:
+async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets_conn: asyncpg.Connection, sub_conn: asyncpg.Connection, poll_conn: asyncpg.Connection, cap: RangeCap, catchup_interval_s: float) -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         targets = await get_watched_targets(targets_conn)
         head_hex = await _rpc(client, http_url, "eth_blockNumber", [])
@@ -235,7 +281,7 @@ async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets
         cursor = await get_cursor(targets_conn)
         if cursor is not None and cursor < head:
             logger.info("backfilling blocks %d..%d before subscribing", cursor, head)
-            await backfill(client, http_url, targets_conn, targets, cursor, head, chunk_blocks)
+            await backfill(client, http_url, targets_conn, targets, cursor, head, cap)
         elif cursor is None:
             await set_cursor(targets_conn, head)
 
@@ -263,7 +309,7 @@ async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets
 
             watch_task = asyncio.create_task(_watch_for_target_changes(targets_conn, targets, ws))
             catch_up_task = asyncio.create_task(
-                _catch_up_loop(client, http_url, poll_conn, targets, chunk_blocks, catchup_interval_s)
+                _catch_up_loop(client, http_url, poll_conn, targets, cap, catchup_interval_s)
             )
             try:
                 block_ts_cache: dict[int, dt.datetime] = {}
@@ -323,12 +369,15 @@ async def run_chain_watcher(settings) -> None:
     try:
         use_fallback = False
         backoff_s = 1
+        # Outside the reconnect loop on purpose: the provider's range cap doesn't
+        # change when the socket drops, so re-probing it per reconnect is pure cost.
+        cap = RangeCap(settings.backfill_chunk_blocks)
         while True:
             ws_url = fallback_ws if (use_fallback and fallback_ws) else primary_ws
             try:
                 await _subscribe_once(
                     ws_url, http_url, settings.database_url, targets_conn, sub_conn, poll_conn,
-                    settings.backfill_chunk_blocks, settings.chain_catchup_interval_s,
+                    cap, settings.chain_catchup_interval_s,
                 )
                 backoff_s = 1
             except Exception as exc:
