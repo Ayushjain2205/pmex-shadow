@@ -351,6 +351,14 @@ class Settings(BaseSettings):
     control_allow_writes: bool = Field(False, validation_alias="PMEX_CONTROL_ALLOW_WRITES")
 
     backfill_chunk_blocks: int = Field(2000, validation_alias="PMEX_BACKFILL_CHUNK_BLOCKS")
+
+    # How often the chain watcher polls eth_getLogs from the cursor to head, in
+    # parallel with the live subscription. This is the floor on chain detection
+    # latency whenever the subscription isn't delivering, which measured as most of
+    # the time — so it wants to stay well under a policy profile's max_fill_age_s
+    # (5s on `tight`), not merely under the market's lifetime. Costs ~2 RPC calls per
+    # tick; raise it if a provider's rate limits bite.
+    chain_catchup_interval_s: float = Field(2.0, validation_alias="PMEX_CHAIN_CATCHUP_INTERVAL_S")
     watcher_stale_s: int = Field(30, validation_alias="PMEX_WATCHER_STALE_S")
     deadman_timeout_s: int = Field(30, validation_alias="PMEX_DEADMAN_TIMEOUT_S")
 

@@ -43,10 +43,20 @@ async def get_cursor(conn: asyncpg.Connection) -> int | None:
 
 
 async def set_cursor(conn: asyncpg.Connection, block: int) -> None:
+    """Advance the coverage cursor, never rewind it.
+
+    GREATEST rather than a plain assignment because the reconnect backfill and the
+    catch-up poll can both be writing here around a reconnect. Whoever finishes last
+    would otherwise win, and a late writer carrying an older block would silently
+    re-open a range already covered — cheap in itself (inserts dedupe), but it makes
+    the cursor stop meaning "eth_getLogs has seen everything up to here", which is
+    the one thing the rest of this module relies on it for.
+    """
     await conn.execute(
         """
         INSERT INTO watcher_cursor (id, last_processed_block) VALUES (1, $1)
-        ON CONFLICT (id) DO UPDATE SET last_processed_block = EXCLUDED.last_processed_block
+        ON CONFLICT (id) DO UPDATE
+            SET last_processed_block = GREATEST(watcher_cursor.last_processed_block, EXCLUDED.last_processed_block)
         """,
         block,
     )
@@ -168,7 +178,55 @@ async def _watch_for_target_changes(targets_conn: asyncpg.Connection, current_ta
             return
 
 
-async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets_conn: asyncpg.Connection, sub_conn: asyncpg.Connection, chunk_blocks: int) -> None:
+async def _catch_up_loop(
+    client: httpx.AsyncClient,
+    http_url: str,
+    conn: asyncpg.Connection,
+    targets: set[str],
+    chunk_blocks: int,
+    interval_s: float,
+) -> None:
+    """Poll eth_getLogs from the cursor to head, continuously, alongside the live
+    subscription.
+
+    The subscription is not reliable enough to be the only path. Providers drop it
+    several times an hour (keepalive ping timeouts, server-side disconnects), and a
+    dropped subscription is silent — the socket can stay open and simply stop
+    delivering. Measured against a live provider, only 11 of 314 chain fills arrived
+    within 5s; the rest surfaced in reconnect-backfill batches 10-30 minutes late, by
+    which point a 5-minute market has resolved and has no book left to price against.
+
+    Polling makes the subscription an optimization rather than a dependency: when it
+    works, fills land in ~1s and this loop finds nothing new; when it dies, fills are
+    still picked up within `interval_s`. Inserts dedupe on dedupe_key, so both paths
+    finding the same fill is normal and only the first one NOTIFYs.
+
+    This loop also owns the cursor (see `_subscribe_once`), which is what stops a
+    brief disconnect from turning into a huge backfill.
+    """
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            head = int(await _rpc(client, http_url, "eth_blockNumber", []), 16)
+            cursor = await get_cursor(conn)
+            if cursor is None:
+                await set_cursor(conn, head)
+                continue
+            if cursor >= head:
+                continue
+            # cursor is inclusive-covered, so resume at the next block — at this
+            # cadence the range is normally one or two blocks.
+            await backfill(client, http_url, conn, targets, cursor + 1, head, chunk_blocks)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never let a transient RPC error kill coverage — the next tick retries,
+            # and the cursor not advancing is itself the durable signal that this is
+            # failing, since it's what the staleness numbers are computed against.
+            logger.exception("catch-up poll failed, retrying in %.1fs", interval_s)
+
+
+async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets_conn: asyncpg.Connection, sub_conn: asyncpg.Connection, poll_conn: asyncpg.Connection, chunk_blocks: int, catchup_interval_s: float) -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         targets = await get_watched_targets(targets_conn)
         head_hex = await _rpc(client, http_url, "eth_blockNumber", [])
@@ -204,6 +262,9 @@ async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets
             logger.info("subscribed to OrderFilled logs (%d targets)", len(targets))
 
             watch_task = asyncio.create_task(_watch_for_target_changes(targets_conn, targets, ws))
+            catch_up_task = asyncio.create_task(
+                _catch_up_loop(client, http_url, poll_conn, targets, chunk_blocks, catchup_interval_s)
+            )
             try:
                 block_ts_cache: dict[int, dt.datetime] = {}
                 async for message in ws:
@@ -222,13 +283,23 @@ async def _subscribe_once(ws_url: str, http_url: str, database_url: str, targets
                     )
                     if fill is not None:
                         await insert_fill(sub_conn, fill, log)
-                    await set_cursor(sub_conn, block_num)
+                    # Deliberately does NOT advance the cursor. This path only sees
+                    # blocks that happen to contain a matching log, so letting it
+                    # write the cursor made coverage a function of how often the
+                    # targets traded: a quiet 20 minutes left the cursor 20 minutes
+                    # stale, and the next disconnect — however brief — had to
+                    # backfill all of it, which is why fills were surfacing in
+                    # half-hour-old batches. Worse, a log arriving from a block ahead
+                    # of unscanned ones marked them covered without ever reading
+                    # them. The catch-up poll owns the cursor now, so it advances
+                    # with the chain rather than with the target's activity.
             finally:
-                watch_task.cancel()
-                try:
-                    await watch_task
-                except asyncio.CancelledError:
-                    pass
+                for task in (watch_task, catch_up_task):
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
 
 async def run_chain_watcher(settings) -> None:
@@ -245,13 +316,20 @@ async def run_chain_watcher(settings) -> None:
 
     targets_conn = await asyncpg.connect(settings.database_url)
     sub_conn = await asyncpg.connect(settings.database_url)
+    # The catch-up poll runs concurrently with both the subscription loop and the
+    # target-change watcher, and an asyncpg connection can't be shared across
+    # concurrent queries — so it gets its own.
+    poll_conn = await asyncpg.connect(settings.database_url)
     try:
         use_fallback = False
         backoff_s = 1
         while True:
             ws_url = fallback_ws if (use_fallback and fallback_ws) else primary_ws
             try:
-                await _subscribe_once(ws_url, http_url, settings.database_url, targets_conn, sub_conn, settings.backfill_chunk_blocks)
+                await _subscribe_once(
+                    ws_url, http_url, settings.database_url, targets_conn, sub_conn, poll_conn,
+                    settings.backfill_chunk_blocks, settings.chain_catchup_interval_s,
+                )
                 backoff_s = 1
             except Exception as exc:
                 logger.warning("chain watcher disconnected (%s), reconnecting in %ds", exc, backoff_s)
@@ -271,3 +349,4 @@ async def run_chain_watcher(settings) -> None:
     finally:
         await targets_conn.close()
         await sub_conn.close()
+        await poll_conn.close()
