@@ -65,12 +65,14 @@
   <h3>Positions</h3>
   {% if not positions %}<p>No positions.</p>{% else %}
   <table>
-    <thead><tr><th>Market</th><th>Shares</th><th>Cost basis</th><th>Realized PnL</th><th>Result</th></tr></thead>
+    <thead><tr><th>Market</th><th>Shares</th><th>Bought at</th><th>Sold at</th><th>Cost basis</th><th>Realized PnL</th><th>Result</th></tr></thead>
     <tbody>
       {% for p in positions %}
       <tr>
         <td>{% if p.market_title %}{{ p.market_title }}{% else %}<code>{{ p.token_id[:16] }}…</code>{% endif %}</td>
         <td>{{ "%.4f"|format(p.shares) }}</td>
+        <td>{{ "$%.3f"|format(p.entry_price) if p.entry_price is not none else "—" }}</td>
+        <td>{{ "$%.3f"|format(p.exit_price) if p.exit_price is not none else "—" }}</td>
         <td>${{ "%.2f"|format(p.cost_basis_usd) }}</td>
         <td>${{ "%.2f"|format(p.realized_pnl_usd) }}</td>
         <td><span class="pill pill-{{ p.lifecycle }}">{{ lifecycle_labels.get(p.lifecycle, p.lifecycle) }}</span></td>

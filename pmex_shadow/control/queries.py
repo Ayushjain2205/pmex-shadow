@@ -354,9 +354,46 @@ async def bot_detail(
 ) -> dict:
     pos_total = await conn.fetchval("SELECT count(*) FROM positions WHERE bot_id = $1", bot_id)
     pos_pg = _page_info(pos_page, POSITIONS_PAGE_SIZE, pos_total)
+    # Both prices are blended over the whole life of the position, and neither can be
+    # read off the position row. cost_basis_usd/shares looks like the entry price but
+    # isn't: basis is relieved as shares go out, so on a partially-sold position it
+    # covers only the remainder while realized_pnl_usd covers every share ever held.
+    # Those two divided against each other produced a negative exit price on the one
+    # position here that was actually sold, and agreed with this query on the 97 that
+    # never were — which is exactly the shape of bug that ships.
+    #
+    # exit_price counts resolution as an exit, because for a binary token it is one:
+    # settling at $1.00 pays exactly what selling at $1.00 would. Sourcing it from SELL
+    # fills instead left it empty on 97 of 98 rows, which reads as missing data rather
+    # than as "held to resolution".
+    #
+    # (total bought + realized_pnl) / total bought shares is what makes a partial exit
+    # come out right: once a position is closed, realized_pnl is proceeds minus the
+    # full cost of every share disposed, so adding back what we paid recovers total
+    # proceeds — sale money and settlement money together. The position that was partly
+    # sold at $0.149 and partly written off blends to $0.126, which neither leg alone
+    # would show. Rounding the resulting price (not the proceeds) absorbs the sub-cent
+    # dust from re-deriving totals off a 6dp avg_fill_price — $0.000027 over 143 shares
+    # was enough to render "$-0.000" — while leaving a genuinely wrong figure visible.
     positions = [dict(r) for r in await conn.fetch(
-        "SELECT token_id, shares, cost_basis_usd, realized_pnl_usd, lifecycle FROM positions "
-        "WHERE bot_id = $1 ORDER BY last_event_at DESC LIMIT $2 OFFSET $3",
+        """
+        WITH buys AS (
+            SELECT token_id, mode,
+                   sum(filled_shares) AS shares,
+                   sum(filled_shares * avg_fill_price) AS notional
+            FROM orders
+            WHERE bot_id = $1 AND side = 'BUY' AND filled_shares > 0 AND avg_fill_price IS NOT NULL
+            GROUP BY token_id, mode
+        )
+        SELECT p.token_id, p.shares, p.cost_basis_usd, p.realized_pnl_usd, p.lifecycle,
+               b.notional / NULLIF(b.shares, 0) AS entry_price,
+               CASE WHEN p.lifecycle IN ('redeemed', 'refunded', 'written_off')
+                    THEN round((b.notional + p.realized_pnl_usd) / NULLIF(b.shares, 0), 4)
+               END AS exit_price
+        FROM positions p
+        LEFT JOIN buys b ON b.token_id = p.token_id AND b.mode = p.mode
+        WHERE p.bot_id = $1 ORDER BY p.last_event_at DESC LIMIT $2 OFFSET $3
+        """,
         bot_id, pos_pg["page_size"], pos_pg["offset"],
     )]
 
