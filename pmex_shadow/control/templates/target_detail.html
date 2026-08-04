@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+{% block title %}{{ target.alias or target.target[:10] }} — pmex-shadow{% endblock %}
+{% block content %}
+{% set b = profile.behaviour %}
+{% set l = profile.ledger %}
+<div class="crumbs">
+  <a href="/">pmex-shadow</a><span class="sep">/</span><a href="/targets">Targets</a><span class="sep">/</span>
+  <span class="here">{{ target.alias or target.target[:10] + "…" }}</span>
+  <span class="crumb-nav">
+    {% if prev_target %}<a class="button button-ghost" href="/targets/{{ prev_target }}">← Prev</a>
+    {% else %}<span class="button button-ghost button-off">← Prev</span>{% endif %}
+    {% if next_target %}<a class="button button-ghost" href="/targets/{{ next_target }}">Next →</a>
+    {% else %}<span class="button button-ghost button-off">Next →</span>{% endif %}
+  </span>
+</div>
+
+<div class="page-head">
+  <div style="display:flex;align-items:center;gap:0.9rem;">
+    {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" alt="" width="48" height="48"
+         style="border-radius:50%;border:1px solid var(--card-border);object-fit:cover;">
+    {% endif %}
+    <div>
+      <h1 style="margin:0;">{{ target.alias or profile.name or profile.pseudonym or (target.target[:10] + "…") }}</h1>
+      <div style="font-size:0.8rem;color:var(--text-muted);margin-top:0.2rem;">
+        <code>{{ target.target }}</code>
+        {% if profile.pseudonym %}<span style="opacity:0.6;"> · {{ profile.pseudonym }}</span>{% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="head-actions">
+    <span class="pill pill-{{ target.status }}">{{ target.status }}</span>
+    <a class="button button-ghost" href="https://polymarket.com/profile/{{ target.target }}"
+       target="_blank" rel="noopener noreferrer">Polymarket ↗</a>
+  </div>
+</div>
+
+{% if profile.bio %}<p class="subtitle">{{ profile.bio }}</p>{% endif %}
+
+{% if profile.errors %}
+<div class="banner banner-error">
+  Couldn't reach Polymarket's Data API for: {{ profile.errors|join(", ") }}. Those panels are empty or
+  incomplete; anything sourced from our own record of their fills is unaffected.
+</div>
+{% endif %}
+
+<div class="stat-grid">
+  <div class="card stat-card">
+    <div class="label">Portfolio value</div>
+    <div class="value">{{ "$%.2f"|format(profile.portfolio_value) if profile.portfolio_value is not none else "—" }}</div>
+    <div class="sub">Open positions, marked to market</div>
+  </div>
+  <div class="card stat-card">
+    <div class="label">Recent P&amp;L</div>
+    {% if l.reliable %}
+    <div class="value {{ 'pos' if l.total_pnl > 0 else ('neg' if l.total_pnl < 0 else '') }}">
+      {{ "-$%.2f"|format(-l.total_pnl) if l.total_pnl < 0 else "$%.2f"|format(l.total_pnl) }}
+    </div>
+    <div class="sub">{{ "{:,}".format(l.settled) }} resolved markets{% if l.roi is not none %} · {{ "%+.2f%%"|format(l.roi * 100) }} on ${{ "{:,.0f}".format(l.total_cost) }} staked{% endif %}</div>
+    {% else %}
+    <div class="value" style="opacity:0.45;">—</div>
+    <div class="sub">Only {{ "%.0f%%"|format(l.coverage * 100) }} of their markets resolve inside this window; a total over the rest would be guesswork. Per-market rows below are still exact.</div>
+    {% endif %}
+  </div>
+  <div class="card stat-card">
+    <div class="label">Typical trade</div>
+    <div class="value">{{ "$%.0f"|format(b.median_size) if b.median_size is not none else "—" }}</div>
+    <div class="sub">Median of last {{ b.trades }} trades · max ${{ "{:,.0f}".format(b.max_size) if b.max_size else "—" }}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="label">Cadence</div>
+    <div class="value">{{ "%.0f/hr"|format(b.trades_per_hour) if b.trades_per_hour else "—" }}</div>
+    <div class="sub">{{ "%.1f"|format(trading.fills_per_day) if trading.fills_per_day else "—" }} fills/day over {{ trading.days_active }} day{{ "" if trading.days_active == 1 else "s" }} we've watched</div>
+  </div>
+</div>
+
+<div class="metric-grid">
+  <div class="metric"><div class="label">Size p50</div><div class="value">{{ "$%.0f"|format(target.size_p50) if target.size_p50 else "—" }}</div></div>
+  <div class="metric"><div class="label">Size p80</div><div class="value">{{ "$%.0f"|format(target.size_p80) if target.size_p80 else "—" }}</div></div>
+  <div class="metric"><div class="label">Size p95</div><div class="value">{{ "$%.0f"|format(target.size_p95) if target.size_p95 else "—" }}</div></div>
+  <div class="metric"><div class="label">Hit rate 30d</div><div class="value">{{ "%.0f%%"|format(target.hit_rate_30d * 100) if target.hit_rate_30d is not none else "—" }}</div></div>
+  <div class="metric"><div class="label">PnL 30d</div>
+    <div class="value {{ 'pos' if target.pnl_30d_usd and target.pnl_30d_usd > 0 else ('neg' if target.pnl_30d_usd and target.pnl_30d_usd < 0 else '') }}">
+      {{ "$%.0f"|format(target.pnl_30d_usd) if target.pnl_30d_usd is not none else "—" }}</div></div>
+  <div class="metric"><div class="label">Reversal rate</div><div class="value">{{ "%.0f%%"|format(target.reversal_rate * 100) if target.reversal_rate is not none else "—" }}</div></div>
+  <div class="metric"><div class="label">Trades seen</div><div class="value">{{ "{:,}".format(trading.fills) }}</div></div>
+  <div class="metric"><div class="label">Markets seen</div><div class="value">{{ "{:,}".format(trading.tokens) }}</div></div>
+  <div class="metric"><div class="label">Notional seen</div><div class="value">${{ "{:,.0f}".format(trading.notional) }}</div></div>
+  <div class="metric"><div class="label">Buy / sell</div><div class="value" style="font-size:1rem;">{{ "{:,}".format(trading.buys) }} / {{ "{:,}".format(trading.sells) }}</div></div>
+  <div class="metric"><div class="label">Detect lag</div><div class="value">{{ "%.1fs"|format(trading.avg_lag_s) if trading.avg_lag_s is not none else "—" }}</div></div>
+  <div class="metric"><div class="label">Watched since</div>
+    <div class="value" style="font-size:1rem;">
+      {% if trading.first_fill %}<span data-utc="{{ trading.first_fill.isoformat() }}" data-mode="relative">{{ trading.first_fill.strftime("%Y-%m-%d") }}</span>{% else %}never{% endif %}
+    </div></div>
+</div>
+
+{# ---- What they actually trade: the answer to "which markets is this wallet in" ---- #}
+<div class="card">
+  <h3>What they trade</h3>
+  <p style="opacity:0.7;font-size:0.85rem;margin-top:-0.4rem;">
+    Their last {{ "{:,}".format(b.sampled) }} actions ({{ "{:,}".format(b.trades) }} trades{% if b.redeems %}, {{ b.redeems }} redemptions{% endif %}{% if b.rebates %}, {{ b.rebates }} rebates{% endif %}){% if b.span_hours %},
+    covering {{ "%.1f"|format(b.span_hours) }} hours{% endif %}. Grouped by series rather than by market: each recurrence of a
+    5-minute market is its own market, so this wallet's {{ "{:,}".format(trading.tokens) }} markets are really
+    {{ b.distinct_series }} thing{{ "" if b.distinct_series == 1 else "s" }} traded over and over.
+  </p>
+  {% if not b.series %}
+  <p style="opacity:0.7;">No trades in the sample{% if "sample" in profile.errors %} — the Data API call failed{% endif %}.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Series</th><th>Trades</th><th>Share</th><th>Avg size</th><th>Notional</th><th></th></tr></thead>
+    <tbody>
+      {% for s in b.series %}
+      <tr>
+        <td><strong>{{ s.label }}</strong><br><code style="font-size:0.7rem;opacity:0.45;">{{ s.series }}</code></td>
+        <td>{{ s.trades }}</td>
+        <td>{{ "%.1f%%"|format(s.share * 100) }}</td>
+        <td>${{ "%.0f"|format(s.avg_size) }}</td>
+        <td>${{ "{:,.0f}".format(s.notional) }}</td>
+        {# A bar reads the concentration at a glance in a way five right-aligned
+           percentages never do — this wallet is one series plus a long tail. #}
+        <td style="width:34%;">
+          <div style="background:rgba(255,255,255,0.05);border-radius:3px;height:8px;">
+            <div style="width:{{ "%.1f"|format(s.share * 100) }}%;background:var(--accent);height:8px;border-radius:3px;"></div>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{# ---- Every market they traded in the window, with what it made or lost ---- #}
+<div class="card">
+  <h3>Trades &amp; P&amp;L</h3>
+  <p style="opacity:0.7;font-size:0.85rem;margin-top:-0.4rem;">
+    Every market they traded in the last {{ "{:,}".format(b.sampled) }} actions{% if l.window_hours %} ({{ "%.1f"|format(l.window_hours) }} hours){% endif %} —
+    what they staked against what came back. Derived from the activity feed, not fetched: Polymarket only
+    reports positions a wallet <em>currently</em> holds, so a redeemed market leaves no record to read.
+    {% if l.clipped %}{{ l.clipped }} market{{ "" if l.clipped == 1 else "s" }} straddling the edge of the window
+    {{ "is" if l.clipped == 1 else "are" }} shown but left out of the totals — their buys fall outside it, so the
+    profit would read as pure gain.{% endif %}
+  </p>
+
+  {% if l.rows %}
+  {% if l.reliable %}
+  <div class="chip-row" style="margin-bottom:0.75rem;">
+    <span class="chip"><span class="chip-dot {{ 'chip-dot-green' if l.total_pnl > 0 else 'chip-dot-red' }}"></span>
+      Net <strong>{{ "-$%.2f"|format(-l.total_pnl) if l.total_pnl < 0 else "$%.2f"|format(l.total_pnl) }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span>Staked <strong>${{ "{:,.0f}".format(l.total_cost) }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span>Returned <strong>${{ "{:,.0f}".format(l.total_payout) }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-blue"></span>Win rate
+      <strong>{{ "%.0f%%"|format(l.win_rate * 100) if l.win_rate is not none else "—" }}</strong>
+      ({{ l.wins }}/{{ l.settled }})</span>
+    {% if l.income %}<span class="chip"><span class="chip-dot chip-dot-amber"></span>Rebates <strong>${{ "%.2f"|format(l.income) }}</strong></span>{% endif %}
+  </div>
+  {% else %}
+  <div class="banner banner-muted" style="margin-bottom:0.75rem;">
+    No totals: only {{ "%.0f%%"|format(l.coverage * 100) }} of the {{ l.excluded + l.settled }} markets they staked on both start
+    and finish inside this window, so a net figure would be summing wins whose losses fall outside it. The
+    per-market rows below are exact — it's only the aggregate that can't be trusted at this coverage.
+  </div>
+  {% endif %}
+
+  <table>
+    <thead>
+      <tr><th>Last</th><th>Market</th><th>Outcome</th><th>Trades</th><th>Staked</th><th>Returned</th><th>P&amp;L</th><th>ROI</th></tr>
+    </thead>
+    <tbody>
+      {% for r in l.rows %}
+      <tr{% if r.clipped %} class="row-archived" title="Clipped by the window edge — excluded from totals"{% endif %}>
+        <td style="white-space:nowrap;">
+          {% if r.last_at %}<span data-utc="{{ r.last_at.isoformat() }}" data-mode="relative">{{ r.last_at.strftime("%H:%M") }}</span>{% endif %}
+        </td>
+        <td><a href="https://polymarket.com/market/{{ r.slug }}" target="_blank" rel="noopener noreferrer">{{ r.title }}</a></td>
+        <td>
+          {{ r.outcome or "—" }}
+          {% if r.status == "open" %}<span class="pill pill-pending_resolution" style="margin-left:0.35rem;">open</span>
+          {% elif r.status == "lost" %}<span class="pill pill-written_off" style="margin-left:0.35rem;">lost</span>
+          {% elif r.status == "pending" %}<span class="pill pill-INFO" style="margin-left:0.35rem;">unresolved</span>{% endif %}
+        </td>
+        <td>{{ r.trades }}</td>
+        <td>${{ "{:,.2f}".format(r.cost) }}</td>
+        <td>
+          {% if r.status == "open" %}<span style="opacity:0.7;">${{ "{:,.2f}".format(r.value) }} <span style="font-size:0.8em;opacity:0.7;">mark</span></span>
+          {% elif r.redeemed %}${{ "{:,.2f}".format(r.redeemed) }}
+          {% else %}<span style="opacity:0.4;">—</span>{% endif %}
+        </td>
+        <td class="{{ 'pos' if r.pnl and r.pnl > 0 else ('neg' if r.pnl and r.pnl < 0 else '') }}">
+          {% if r.pnl is none %}<span style="opacity:0.4;">—</span>
+          {% else %}{{ "-$%.2f"|format(-r.pnl) if r.pnl < 0 else "$%.2f"|format(r.pnl) }}{% endif %}
+        </td>
+        <td class="{{ 'pos' if r.roi and r.roi > 0 else ('neg' if r.roi and r.roi < 0 else '') }}">
+          {{ "%+.1f%%"|format(r.roi * 100) if r.roi is not none else "—" }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if l.truncated %}
+  <p style="opacity:0.6;font-size:0.85rem;">
+    Showing the {{ l.rows|length }} most recent of {{ "{:,}".format(l.total_markets) }} markets in the window.
+    The totals above cover all of them; “What they trade” aggregates every one.
+  </p>
+  {% endif %}
+  {% else %}
+  <p style="opacity:0.7;">No trades in the window{% if "window" in profile.errors %} — the Data API call failed{% endif %}.</p>
+  {% endif %}
+</div>
+
+{# ---- Their activity, annotated with what we did ---- #}
+<div class="card">
+  <h3>Activity</h3>
+  <p style="opacity:0.7;font-size:0.85rem;margin-top:-0.4rem;">
+    Live from Polymarket, newest first. “Our call” is our decision for that <em>market</em> aggregated across
+    bots and repeat trades in it — their feed and our fills share no per-trade identifier.
+  </p>
+  {% if not profile.activity %}
+  <p style="opacity:0.7;">No activity{% if "activity" in profile.errors %} — the Data API call failed{% endif %}.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>When</th><th>Market</th><th>Action</th><th>Outcome</th><th>Price</th><th>Size</th><th>Our call</th></tr>
+    </thead>
+    <tbody>
+      {% for a in profile.activity %}
+      {% set call = our_calls.get(a.asset) %}
+      <tr>
+        <td style="white-space:nowrap;">
+          {% if a.at %}<span data-utc="{{ a.at.isoformat() }}" data-mode="relative">{{ a.at.strftime("%H:%M") }}</span>{% endif %}
+        </td>
+        <td><a href="https://polymarket.com/market/{{ a.slug }}" target="_blank" rel="noopener noreferrer">{{ a.title }}</a></td>
+        <td>
+          {% if a.type == "TRADE" %}<span class="pill pill-{{ 'COPY' if a.side == 'BUY' else 'SKIP' }}">{{ a.side }}</span>
+          {% else %}<span class="pill pill-INFO">{{ a.type }}</span>{% endif %}
+        </td>
+        <td>{{ a.outcome or "—" }}</td>
+        <td>{{ "%.3f"|format(a.price) if a.type == "TRADE" else "—" }}</td>
+        <td>${{ "%.2f"|format(a.usdcSize) }}</td>
+        <td style="white-space:nowrap;">
+          {# A redemption isn't a trade we could have copied, so it has no verdict to
+             report — "not seen" would read as us having passed on something. #}
+          {% if a.type != "TRADE" %}
+            <span style="opacity:0.4;">—</span>
+          {% elif call is none %}
+            <span style="opacity:0.4;">not seen</span>
+          {% elif call.copies %}
+            <span class="pill pill-COPY">copied{% if call.copies > 1 %} ×{{ call.copies }}{% endif %}</span>
+          {% else %}
+            <span class="pill pill-cat-{{ call.skip_category }}" title="{{ call.skips }} skip decisions">{{ call.skip_label }}</span>
+            {% if call.extra_reasons %}<span style="opacity:0.5;font-size:0.8em;">+{{ call.extra_reasons }}</span>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.75rem;font-size:0.85rem;">
+    {% if profile.activity_page > 1 %}
+    <a href="?activity_page={{ profile.activity_page - 1 }}">← Newer</a>
+    {% else %}<span style="opacity:0.35;">← Newer</span>{% endif %}
+    <span style="opacity:0.65;">Page {{ profile.activity_page }}</span>
+    {% if profile.activity_has_next %}
+    <a href="?activity_page={{ profile.activity_page + 1 }}">Older →</a>
+    {% else %}<span style="opacity:0.35;">Older →</span>{% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{# ---- Us, last and compact: this is their page, not the fleet's ---- #}
+<div class="card">
+  <h3>Us, following them</h3>
+  <div class="chip-row" style="margin-bottom:0.5rem;">
+    <span class="chip"><span class="chip-dot {{ 'chip-dot-green' if pnl.realized_pnl > 0 else 'chip-dot-red' }}"></span>
+      Realized <strong>{{ "-$%.2f"|format(-pnl.realized_pnl) if pnl.realized_pnl < 0 else "$%.2f"|format(pnl.realized_pnl) }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-blue"></span>Copied <strong>{{ "{:,}".format(copies) }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-amber"></span>Skipped <strong>{{ "{:,}".format(skip_total) }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span>{{ pnl.positions }} positions · {{ pnl.open_positions }} open</span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span>Win rate <strong>{{ "%.0f%%"|format(win_rate * 100) if win_rate is not none else "—" }}</strong></span>
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span>{{ following_bots|join(", ") or "no bots" }}</span>
+  </div>
+  {% if skips %}
+  <details>
+    <summary style="cursor:pointer;color:var(--text-muted);font-size:0.85rem;font-weight:600;">
+      Why we skipped {{ "{:,}".format(skip_total) }} of their fills
+    </summary>
+    <p style="opacity:0.7;font-size:0.85rem;">
+      One row per bot per fill, so five bots skipping the same fill is five decisions. This is what tells you
+      whether your selectors are filtering out the thing you followed this wallet for.
+    </p>
+    <table>
+      <thead><tr><th>Reason</th><th>Decisions</th><th>Bots</th><th>Share</th></tr></thead>
+      <tbody>
+        {% for s in skips %}
+        <tr>
+          <td><span class="pill pill-cat-{{ s.skip_category }}">{{ s.skip_label }}</span></td>
+          <td>{{ "{:,}".format(s.n) }}</td>
+          <td>{{ s.bots }}</td>
+          <td>{{ "%.1f%%"|format(s.n / skip_total * 100) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</div>
+{% endblock %}

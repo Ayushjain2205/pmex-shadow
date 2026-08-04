@@ -11,22 +11,25 @@ touches Prometheus.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import re
 import sys
 from pathlib import Path
 
 import asyncpg
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from pmex_shadow.config import Settings
 from pmex_shadow.control import config_write, queries
+from pmex_shadow.targets.profile import fetch_profile
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 _BOT_PATH = re.compile(r"^/bots/[A-Za-z0-9_.-]+$")
+_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def _return_to(value: str) -> str:
@@ -231,6 +234,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     message += f", already in {bot_id}'s target list"
 
         return RedirectResponse(f"/targets?message={quote(message)}", status_code=303)
+
+    @app.get("/targets/{address}")
+    async def target_detail(request: Request, address: str, activity_page: int = 1):
+        """A target wallet's profile: their real trading history from Polymarket's
+        Data API, alongside what our bots decided about the slice of it we saw.
+
+        The two halves fail independently on purpose — the Data API is a live
+        third-party call and the Postgres half isn't, so a slow or down Data API
+        costs you the profile panels and nothing else.
+        """
+        if not _ADDRESS.match(address):
+            raise HTTPException(status_code=404, detail="not a wallet address")
+        addr = address.lower()
+
+        async with app.state.pool.acquire() as conn:
+            detail, profile = await asyncio.gather(
+                queries.target_detail(conn, addr),
+                fetch_profile(settings.data_api_base_url, addr, activity_page),
+            )
+            if detail is None:
+                raise HTTPException(status_code=404, detail=f"{addr} is not a registered target")
+            # Only the markets on the visible activity page need a decision lookup —
+            # this is why the feed is paginated rather than rendered whole.
+            our_calls = await queries.decisions_for_tokens(
+                conn, addr, [a["asset"] for a in profile["activity"] if a.get("asset")],
+            )
+
+        return templates.TemplateResponse(
+            request, "target_detail.html",
+            _ctx(request, active_nav="targets", profile=profile, our_calls=our_calls, **detail),
+        )
 
     @app.get("/analysis")
     async def analysis(request: Request):

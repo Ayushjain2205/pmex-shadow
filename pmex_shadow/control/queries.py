@@ -671,6 +671,163 @@ async def targets_view(conn: asyncpg.Connection) -> dict:
     return {"targets": rows, "stalest_computed_at": stalest_computed_at, "stats_stale": stats_stale}
 
 
+async def target_detail(conn: asyncpg.Connection, target: str) -> dict | None:
+    """Our side of a target's page: what we ingested from this wallet and what our
+    bots decided to do about it. Returns None if the wallet isn't registered.
+
+    The wallet's *own* trading history is not here — that comes live from the Data
+    API (targets/profile.py). This half is the thing Polymarket's own profile page
+    can't show: for each of their fills we saw, did we copy it or skip it and why.
+    """
+    row = await conn.fetchrow(
+        "SELECT target, alias, status, size_p50, size_p60, size_p80, size_p95, fills_30d, "
+        "hit_rate_30d, pnl_30d_usd, reversal_rate, last_fill_at, computed_at "
+        "FROM target_stats WHERE target = $1",
+        target,
+    )
+    if row is None:
+        return None
+
+    # This is the wallet's own trading, as we observed it — not a report on our
+    # plumbing. `target_fills` is a record of *their* fills; the only thing that makes
+    # it ours is that it starts the day we began watching, which is why first_fill is
+    # surfaced alongside it rather than left implicit.
+    #
+    # avg_lag_s is the one genuinely operational number here, kept because a wallet
+    # whose fills reach us minutes late is one we cannot actually copy, however good
+    # its trading looks.
+    trading = await conn.fetchrow(
+        """
+        SELECT count(*) AS fills,
+               count(DISTINCT token_id) AS tokens,
+               min(block_ts) AS first_fill,
+               max(block_ts) AS last_fill,
+               COALESCE(sum(notional_usd), 0) AS notional,
+               avg(notional_usd) AS avg_notional,
+               count(*) FILTER (WHERE side = 'BUY') AS buys,
+               count(*) FILTER (WHERE side = 'SELL') AS sells,
+               count(DISTINCT date_trunc('day', block_ts)) AS days_active,
+               count(*) FILTER (WHERE source = 'chain') AS from_chain,
+               avg(extract(epoch FROM (detected_at - block_ts))) AS avg_lag_s
+        FROM target_fills WHERE target = $1
+        """,
+        target,
+    )
+    trading = dict(trading)
+    trading["fills_per_day"] = (
+        trading["fills"] / trading["days_active"] if trading["days_active"] else None
+    )
+
+    # One fill produces one intent per bot following this wallet, so these counts are
+    # decisions, not fills — five bots skipping the same fill is five rows. Counting
+    # distinct fill_id instead would hide that two bots disagreed about it, which is
+    # exactly what you come to this page to see.
+    decisions = [dict(r) for r in await conn.fetch(
+        """
+        SELECT i.decision, i.skip_reason, count(*) AS n, count(DISTINCT i.bot_id) AS bots
+        FROM intents i JOIN target_fills f ON f.id = i.fill_id
+        WHERE f.target = $1
+        GROUP BY i.decision, i.skip_reason ORDER BY n DESC
+        """,
+        target,
+    )]
+    copies = sum(d["n"] for d in decisions if d["decision"] == "COPY")
+    skips = [d for d in decisions if d["decision"] == "SKIP"]
+    for s in skips:
+        s["skip_label"] = _skip_label(s["skip_reason"])
+        s["skip_category"] = _skip_category(s["skip_reason"])
+
+    following_bots = [r["bot_id"] for r in await conn.fetch(
+        "SELECT DISTINCT i.bot_id FROM intents i JOIN target_fills f ON f.id = i.fill_id "
+        "WHERE f.target = $1 ORDER BY i.bot_id",
+        target,
+    )]
+
+    # PnL our bots made following this wallet. Attribution is to the wallet whose
+    # fill *opened* the position (earliest COPY intent on that token, per bot+mode) —
+    # the same rule the bot page's "by wallet" table uses, so the two agree.
+    pnl = await conn.fetchrow(
+        """
+        WITH opened_by AS (
+            SELECT DISTINCT ON (i.bot_id, i.token_id, i.mode)
+                   i.bot_id, i.token_id, i.mode, f.target
+            FROM intents i JOIN target_fills f ON f.id = i.fill_id
+            WHERE i.decision = 'COPY'
+            ORDER BY i.bot_id, i.token_id, i.mode, i.created_at
+        )
+        SELECT count(*) AS positions,
+               count(*) FILTER (WHERE p.lifecycle IN ('redeemed','refunded','written_off')) AS closed,
+               count(*) FILTER (WHERE p.lifecycle IN ('redeemed','refunded','written_off') AND p.realized_pnl_usd > 0) AS wins,
+               count(*) FILTER (WHERE p.lifecycle = 'open') AS open_positions,
+               COALESCE(sum(p.realized_pnl_usd), 0) AS realized_pnl
+        FROM positions p
+        JOIN opened_by o ON o.bot_id = p.bot_id AND o.token_id = p.token_id AND o.mode = p.mode
+        WHERE o.target = $1
+        """,
+        target,
+    )
+
+    siblings = [r["target"] for r in await conn.fetch("SELECT target FROM target_stats ORDER BY target")]
+    here = siblings.index(target) if target in siblings else None
+    prev_target = siblings[here - 1] if here else None
+    next_target = siblings[here + 1] if here is not None and here + 1 < len(siblings) else None
+
+    return {
+        "target": dict(row),
+        "trading": trading,
+        "copies": copies,
+        "skips": skips,
+        "skip_total": sum(s["n"] for s in skips),
+        "following_bots": following_bots,
+        "pnl": dict(pnl),
+        "win_rate": (pnl["wins"] / pnl["closed"]) if pnl["closed"] else None,
+        "prev_target": prev_target,
+        "next_target": next_target,
+    }
+
+
+async def decisions_for_tokens(conn: asyncpg.Connection, target: str, token_ids: list[str]) -> dict[str, dict]:
+    """Our verdict on each market in the visible slice of a wallet's activity feed.
+
+    Keyed by token_id and aggregated across bots and across repeat visits to the same
+    market — a per-fill join isn't available, because the Data API's activity rows and
+    our `target_fills` rows have no shared identifier (their `asset`+timestamp vs our
+    dedupe_key). Market-level is the honest granularity, and the template labels it
+    as such rather than implying it's the verdict on that one trade.
+
+    A token absent from the result means we have no decision on record for it at all:
+    usually that it predates our ingest of this wallet, not that we passed on it.
+    """
+    if not token_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT i.token_id,
+               count(*) FILTER (WHERE i.decision = 'COPY') AS copies,
+               count(*) FILTER (WHERE i.decision = 'SKIP') AS skips,
+               array_remove(array_agg(DISTINCT i.skip_reason), NULL) AS reasons
+        FROM intents i JOIN target_fills f ON f.id = i.fill_id
+        WHERE f.target = $1 AND i.token_id = ANY($2::text[])
+        GROUP BY i.token_id
+        """,
+        target, token_ids,
+    )
+    out: dict[str, dict] = {}
+    for r in rows:
+        reasons = list(r["reasons"] or [])
+        out[r["token_id"]] = {
+            "copies": r["copies"],
+            "skips": r["skips"],
+            # The dominant reason is enough for a table cell; the full breakdown for
+            # the wallet is in the skip-reason card above it.
+            "skip_reason": reasons[0] if reasons else None,
+            "skip_label": _skip_label(reasons[0]) if reasons else None,
+            "skip_category": _skip_category(reasons[0]) if reasons else None,
+            "extra_reasons": len(reasons) - 1 if len(reasons) > 1 else 0,
+        }
+    return out
+
+
 async def logs_view(
     conn: asyncpg.Connection, bot_id: str | None, component: str | None, level: str | None, page: int = 1,
 ) -> dict:

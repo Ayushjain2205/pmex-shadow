@@ -63,7 +63,7 @@
   <tbody>
     {% for t in targets %}
     <tr>
-      <td><strong>{{ t.alias or t.target[:10] + "…" }}</strong><br><code style="font-size:0.7rem;opacity:0.5">{{ t.target }}</code></td>
+      <td><a href="/targets/{{ t.target }}"><strong>{{ t.alias or t.target[:10] + "…" }}</strong></a><br><code style="font-size:0.7rem;opacity:0.5">{{ t.target }}</code></td>
       <td><span class="pill pill-{{ t.status }}">{{ t.status }}</span></td>
       <td>{{ "%.2f"|format(t.size_p50) if t.size_p50 else "—" }}</td>
       <td>{{ "%.2f"|format(t.size_p80) if t.size_p80 else "—" }}</td>
