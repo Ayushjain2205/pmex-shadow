@@ -24,36 +24,75 @@
 </div>
 {% endif %}
 
-<div class="card">
-  <div class="stat-row">
-    <div class="stat">
-      <div class="label">Wallet (envelope + realized)</div>
-      <div class="value">${{ "%.2f"|format((envelope_usd|float if envelope_usd else 0) + total_realized_pnl|float) }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Started with</div>
-      <div class="value">${{ "%.2f"|format(envelope_usd|float) if envelope_usd else "—" }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Session P&amp;L</div>
-      <div class="value" style="color: {{ 'inherit' if total_realized_pnl == 0 else ('#4ade80' if total_realized_pnl > 0 else '#f87171') }}">{{ "%+.2f"|format(total_realized_pnl) }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Win rate</div>
-      <div class="value">{{ "%.0f%%"|format(win_rate * 100) if win_rate is not none else "—" }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Wins / losses</div>
-      <div class="value">{{ wins }} / {{ losses }}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Deployed (open)</div>
-      <div class="value">${{ "%.2f"|format(deployed_usd) }}</div>
+{% set start_usd = envelope_usd|float if envelope_usd else 0 %}
+{% set balance_usd = start_usd + total_realized_pnl|float %}
+<div class="stat-grid">
+  <div class="card stat-card">
+    <div class="label">Wallet balance</div>
+    <div class="value">{{ "-$%.2f"|format(-balance_usd) if balance_usd < 0 else "$%.2f"|format(balance_usd) }}</div>
+    <div class="sub">Envelope + realized PnL</div>
+  </div>
+  <div class="card stat-card">
+    <div class="label">Started with</div>
+    <div class="value">{{ "$%.2f"|format(start_usd) if envelope_usd else "—" }}</div>
+    <div class="sub">{% if started_at %}<span data-utc="{{ started_at.isoformat() }}">{{ started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</span>{% else %}No decisions yet{% endif %}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="label">Session P&amp;L</div>
+    <div class="value {{ '' if total_realized_pnl == 0 else ('pos' if total_realized_pnl > 0 else 'neg') }}">{{ "%+.2f"|format(total_realized_pnl) }}</div>
+    <div class="sub">{% if envelope_usd %}{{ "%+.2f%%"|format(total_realized_pnl|float / start_usd * 100) }} return{% else %}No envelope configured{% endif %}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="label">Deployed</div>
+    <div class="value">${{ "%.2f"|format(deployed_usd) }}</div>
+    <div class="sub">{{ open_positions }} open position{{ "" if open_positions == 1 else "s" }}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="label">Total wagered</div>
+    <div class="value">${{ "%.2f"|format(wagered_usd) }}</div>
+    <div class="sub">{{ trade_count }} buys{% if avg_trade_usd %} · ${{ "%.2f"|format(avg_trade_usd) }}/buy{% endif %}</div>
+  </div>
+</div>
+
+<div class="metric-grid">
+  <div class="metric">
+    <div class="label">Win rate</div>
+    <div class="value">{{ "%.1f%%"|format(win_rate * 100) if win_rate is not none else "—" }}</div>
+  </div>
+  <div class="metric">
+    <div class="label">Wins / losses</div>
+    <div class="value">{{ wins }} / {{ losses }}</div>
+  </div>
+  <div class="metric">
+    <div class="label">Avg per trade</div>
+    <div class="value {{ '' if not avg_pnl_per_trade else ('pos' if avg_pnl_per_trade > 0 else 'neg') }}">{{ "%+.2f"|format(avg_pnl_per_trade) if avg_pnl_per_trade is not none else "—" }}</div>
+  </div>
+  <div class="metric">
+    <div class="label">Closed</div>
+    <div class="value">{{ closed_trades }}</div>
+  </div>
+  <div class="metric">
+    <div class="label">Pending</div>
+    <div class="value">{{ pending_positions }}</div>
+  </div>
+  <div class="metric">
+    <div class="label">Heartbeat</div>
+    <div class="value {{ 'pos' if heartbeat_ok else 'neg' }}" style="font-size:1rem;">
+      {% if heartbeat_at %}<span data-utc="{{ heartbeat_at.isoformat() }}" data-mode="relative">{{ heartbeat_at.strftime("%H:%M:%S") }} UTC</span>{% else %}never{% endif %}
     </div>
   </div>
+</div>
 
-  <h3 style="margin-top: 1.5rem;">Cumulative P&amp;L</h3>
-  <div id="equity-chart" data-points="{{ equity_curve_json }}"></div>
+<div class="card" style="margin-top: 1rem;">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap;">
+    <div>
+      <h3 style="margin:0;">{{ "Wallet balance" if envelope_usd else "Cumulative P&L" }}</h3>
+      <div id="equity-delta" style="font-size:1.6rem;font-weight:700;letter-spacing:-0.02em;margin-top:0.3rem;">—</div>
+      <div id="equity-delta-label" style="font-size:0.8rem;color:var(--text-muted);"></div>
+    </div>
+    <div class="range-tabs" id="equity-ranges" role="group" aria-label="Chart range"></div>
+  </div>
+  <div id="equity-chart" data-points="{{ equity_curve_json }}" data-baseline="{{ start_usd if envelope_usd else 0 }}" data-absolute="{{ 1 if envelope_usd else 0 }}"></div>
 </div>
 
 {% set lifecycle_labels = {
@@ -177,86 +216,263 @@
 <script>
 (function () {
   const container = document.getElementById("equity-chart");
+  const tabsEl = document.getElementById("equity-ranges");
+  const deltaEl = document.getElementById("equity-delta");
+  const deltaLabelEl = document.getElementById("equity-delta-label");
   if (!container) return;
-  const points = JSON.parse(container.dataset.points || "[]");
-  if (points.length < 2) {
-    container.innerHTML = '<p style="opacity:0.6;font-size:0.9rem;">Not enough closed trades yet to chart.</p>';
+
+  // Server sends cumulative realized PnL per hour bucket. When the bot has an
+  // envelope configured the chart plots the wallet balance (envelope + that),
+  // because "what is this bot worth" is the question the top-left number answers
+  // and a curve starting at $0 doesn't line up with it. Without an envelope there
+  // is no balance to speak of, so it stays a PnL curve anchored at zero.
+  const raw = JSON.parse(container.dataset.points || "[]");
+  const baseline = parseFloat(container.dataset.baseline) || 0;
+  const absolute = container.dataset.absolute === "1";
+  const series = raw.map(p => ({ t: new Date(p.t).getTime(), v: baseline + p.v }))
+                    .filter(p => !isNaN(p.t))
+                    .sort((a, b) => a.t - b.t);
+
+  if (series.length === 0) {
+    container.innerHTML = '<p style="opacity:0.6;font-size:0.9rem;">Nothing closed yet — no curve to chart.</p>';
+    if (tabsEl) tabsEl.remove();
+    if (deltaEl) deltaEl.textContent = "";
     return;
   }
 
-  const width = container.clientWidth || 800, height = 220;
-  const padL = 56, padR = 12, padT = 12, padB = 24;
-  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const DAY = 86400000;
+  const RANGES = [
+    { key: "1D", label: "Past day", span: DAY },
+    { key: "1W", label: "Past week", span: 7 * DAY },
+    { key: "1M", label: "Past month", span: 30 * DAY },
+    { key: "1Y", label: "Past year", span: 365 * DAY },
+    { key: "YTD", label: "Year to date", ytd: true },
+    { key: "ALL", label: "All time", span: Infinity },
+  ];
 
-  const times = points.map(p => new Date(p.t).getTime());
-  const values = points.map(p => p.v);
-  const tMin = Math.min(...times), tMax = Math.max(...times);
-  const vMin = Math.min(0, ...values), vMax = Math.max(0, ...values);
-  const vSpan = (vMax - vMin) || 1;
+  function rangeStart(range, now) {
+    if (range.ytd) return new Date(new Date(now).getFullYear(), 0, 1).getTime();
+    return range.span === Infinity ? -Infinity : now - range.span;
+  }
 
-  const x = t => padL + (tMax === tMin ? plotW / 2 : ((t - tMin) / (tMax - tMin)) * plotW);
-  const y = v => padT + plotH - ((v - vMin) / vSpan) * plotH;
+  // A window's first value is whatever the curve was *before* the window opened,
+  // not the first bucket inside it — otherwise "past day" on a bot that closed one
+  // trade this morning reports a change of zero, having silently redefined its own
+  // starting point. The anchor is carried forward from the last earlier bucket
+  // (or from the envelope itself, if the window predates any trading at all).
+  function window_(range, now) {
+    const from = rangeStart(range, now);
+    const inside = series.filter(p => p.t >= from);
+    const before = series.filter(p => p.t < from);
+    const anchorV = before.length ? before[before.length - 1].v : baseline;
+    // On a range wider than the bot's history the anchor sits just before the first
+    // bucket rather than at the window edge, so a week-old bot on "1Y" isn't a spike
+    // jammed against the right of eleven empty months.
+    const anchorT = from > series[0].t ? from : series[0].t - 1;
+    const pts = [{ t: anchorT, v: anchorV }, ...inside];
+    // Cumulative series don't stop when trading does — they stay flat. Running the
+    // line out to "now" says "nothing has closed since", which a line ending
+    // mid-plot reads as missing data instead.
+    const last = pts[pts.length - 1];
+    if (last.t < now) pts.push({ t: now, v: last.v });
+    return { pts, from };
+  }
 
-  const last = values[values.length - 1];
-  const color = last >= 0 ? "#4ade80" : "#f87171";
-  const zeroY = y(0);
+  function niceScale(min, max, count) {
+    if (!(max > min)) {
+      const pad = Math.max(Math.abs(max) * 0.02, 0.5);
+      min -= pad; max += pad;
+    }
+    const step = (() => {
+      const rawStep = (max - min) / count;
+      const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+      const norm = rawStep / mag;
+      return (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+    })();
+    const ticks = [];
+    for (let v = Math.floor(min / step) * step; v <= max + step * 0.5; v += step) ticks.push(v);
+    return { ticks, min: ticks[0], max: ticks[ticks.length - 1], decimals: step >= 1 ? 0 : step >= 0.1 ? 1 : 2 };
+  }
 
-  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(times[i]).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
-  const areaPath = `${linePath} L${x(times[times.length - 1]).toFixed(1)},${zeroY.toFixed(1)} L${x(times[0]).toFixed(1)},${zeroY.toFixed(1)} Z`;
+  const money = v => (v < 0 ? "-$" + Math.abs(v).toFixed(2) : (absolute ? "" : "+") + "$" + v.toFixed(2));
+  const signed = v => (v >= 0 ? "+" : "") + v.toFixed(2);
+  // Ticks accumulate off a floating-point step, so the one that lands on zero can
+  // arrive as -1e-16 and print as "-0.0".
+  const tickLabel = (v, decimals) => (Math.abs(v) < 1e-9 ? 0 : v).toFixed(decimals);
 
-  const gridStroke = "rgba(148, 163, 184, 0.18)";
-  const textColor = "#e7ebf3";
+  // Chosen off the gap between ticks, not the total span: six labels over three days
+  // are ~14h apart, so a date-only format prints "2 Aug" twice in a row and reads as
+  // a rendering bug. Any interval under a day keeps the clock time.
+  function timeFormat(span) {
+    const interval = span / 5;
+    if (interval < DAY) {
+      // The date comes back as soon as the window can straddle midnight, or "02:26"
+      // and "19:27" sit on the same axis with nothing saying they're different days.
+      const opts = span <= 1.05 * DAY
+        ? { hour: "2-digit", minute: "2-digit", hour12: false }
+        : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false };
+      return d => d.toLocaleString(undefined, opts);
+    }
+    if (span <= 400 * DAY) return d => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return d => d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  }
+
+  const GRID = "rgba(148, 163, 184, 0.14)";
+  const TEXT = "#e7ebf3";
+  const LINE = "#60a5fa";
   const svgNS = "http://www.w3.org/2000/svg";
+  const gradId = "equity-fill";
 
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:${height}px;overflow:visible;" role="img" aria-label="Cumulative P&L over time">
-      <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${width - padR}" y2="${zeroY.toFixed(1)}" stroke="${gridStroke}" stroke-width="1"/>
-      <text x="${padL - 8}" y="${zeroY.toFixed(1)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${textColor}" opacity="0.6">$0</text>
-      <text x="${padL - 8}" y="${(padT + 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${textColor}" opacity="0.6">${vMax >= 0 ? "$" + vMax.toFixed(0) : ""}</text>
-      <text x="${padL - 8}" y="${(padT + plotH - 4)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${textColor}" opacity="0.6">${vMin < 0 ? "$" + vMin.toFixed(0) : ""}</text>
-      <path d="${areaPath}" fill="${color}" opacity="0.10" stroke="none"/>
-      <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-      <circle cx="${x(times[times.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="4" fill="${color}" stroke="#11192c" stroke-width="2"/>
-      <text x="${x(times[times.length - 1]).toFixed(1)}" y="${(y(last) - 10).toFixed(1)}" text-anchor="end" font-size="12" font-weight="600" fill="${textColor}">${last >= 0 ? "+" : ""}$${last.toFixed(2)}</text>
-      <g id="hover-layer"></g>
-    </svg>
-    <div id="chart-tooltip" style="position:absolute;display:none;pointer-events:none;background:#11192c;border:1px solid rgba(148, 163, 184, 0.2);border-radius:6px;padding:0.4rem 0.6rem;font-size:0.8rem;box-shadow:0 2px 8px rgba(0,0,0,0.35);"></div>
-  `;
+  let current = null;
 
-  const svg = container.querySelector("svg");
-  const hoverLayer = container.querySelector("#hover-layer");
-  const tooltip = container.querySelector("#chart-tooltip");
-  container.style.position = "relative";
+  function render(range) {
+    current = range;
+    const now = Date.now();
+    const { pts } = window_(range, now);
+    if (pts.length < 2) {
+      container.innerHTML = '<p style="opacity:0.6;font-size:0.9rem;padding:2rem 0;">No history in this range.</p>';
+      deltaEl.textContent = "—";
+      deltaEl.className = "";
+      deltaLabelEl.textContent = range.label;
+      return;
+    }
 
-  const crosshair = document.createElementNS(svgNS, "line");
-  crosshair.setAttribute("y1", padT);
-  crosshair.setAttribute("y2", padT + plotH);
-  crosshair.setAttribute("stroke", gridStroke);
-  crosshair.setAttribute("stroke-width", "1");
-  crosshair.style.display = "none";
-  hoverLayer.appendChild(crosshair);
+    const delta = pts[pts.length - 1].v - pts[0].v;
+    deltaEl.textContent = signed(delta);
+    deltaEl.className = delta === 0 ? "" : delta > 0 ? "pos" : "neg";
+    deltaLabelEl.textContent = range.label;
 
-  svg.addEventListener("pointermove", (ev) => {
-    const rect = svg.getBoundingClientRect();
-    const px = ((ev.clientX - rect.left) / rect.width) * width;
-    const targetT = tMin + ((px - padL) / plotW) * (tMax - tMin);
-    let nearest = 0, bestDist = Infinity;
-    times.forEach((t, i) => { const d = Math.abs(t - targetT); if (d < bestDist) { bestDist = d; nearest = i; } });
+    const width = container.clientWidth || 800, height = 260;
+    const padL = 56, padR = 16, padT = 14, padB = 26;
+    const plotW = Math.max(width - padL - padR, 10), plotH = height - padT - padB;
 
-    const cx = x(times[nearest]);
-    crosshair.setAttribute("x1", cx.toFixed(1));
-    crosshair.setAttribute("x2", cx.toFixed(1));
-    crosshair.style.display = "block";
+    const times = pts.map(p => p.t);
+    const values = pts.map(p => p.v);
+    const tMin = times[0], tMax = times[times.length - 1];
+    const scale = niceScale(
+      absolute ? Math.min(...values) : Math.min(0, ...values),
+      absolute ? Math.max(...values) : Math.max(0, ...values),
+      4,
+    );
 
-    const d = new Date(times[nearest]);
-    tooltip.innerHTML = `<strong>${values[nearest] >= 0 ? "+" : ""}$${values[nearest].toFixed(2)}</strong><br><span style="opacity:0.6">${d.toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>`;
-    tooltip.style.display = "block";
-    tooltip.style.left = Math.min(cx + 12, width - 140) + "px";
-    tooltip.style.top = "4px";
-  });
-  svg.addEventListener("pointerleave", () => {
+    const x = t => padL + (tMax === tMin ? plotW : ((t - tMin) / (tMax - tMin)) * plotW);
+    const y = v => padT + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
+
+    const linePath = pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+    const floor = padT + plotH;
+    const areaPath = `${linePath} L${x(times[times.length - 1]).toFixed(1)},${floor} L${x(times[0]).toFixed(1)},${floor} Z`;
+
+    const fmtTime = timeFormat(tMax - tMin);
+    const xTicks = Array.from({ length: 6 }, (_, i) => tMin + ((tMax - tMin) * i) / 5);
+
+    const last = values[values.length - 1];
+
+    container.innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:${height}px;" role="img"
+           aria-label="${absolute ? "Wallet balance" : "Cumulative P&L"} over the ${range.label.toLowerCase()}">
+        <defs>
+          <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="${LINE}" stop-opacity="0.28"/>
+            <stop offset="100%" stop-color="${LINE}" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        ${scale.ticks.map(v => `
+          <line x1="${padL}" y1="${y(v).toFixed(1)}" x2="${width - padR}" y2="${y(v).toFixed(1)}" stroke="${GRID}" stroke-width="1"/>
+          <text x="${padL - 10}" y="${y(v).toFixed(1)}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="${TEXT}" opacity="0.55">${tickLabel(v, scale.decimals)}</text>
+        `).join("")}
+        ${xTicks.map((t, i) => `
+          <text x="${x(t).toFixed(1)}" y="${height - 6}" text-anchor="${i === 0 ? "start" : i === 5 ? "end" : "middle"}" font-size="11" fill="${TEXT}" opacity="0.55">${fmtTime(new Date(t))}</text>
+        `).join("")}
+        <path d="${areaPath}" fill="url(#${gradId})" stroke="none"/>
+        <path d="${linePath}" fill="none" stroke="${LINE}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="${x(times[times.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="4" fill="${LINE}" stroke="#11192c" stroke-width="2"/>
+        <g id="hover-layer"></g>
+      </svg>
+      <div id="chart-tooltip" style="position:absolute;display:none;pointer-events:none;background:#11192c;border:1px solid rgba(148, 163, 184, 0.2);border-radius:6px;padding:0.4rem 0.6rem;font-size:0.8rem;box-shadow:0 2px 8px rgba(0,0,0,0.35);white-space:nowrap;"></div>
+    `;
+
+    const svg = container.querySelector("svg");
+    const hoverLayer = container.querySelector("#hover-layer");
+    const tooltip = container.querySelector("#chart-tooltip");
+    container.style.position = "relative";
+
+    const crosshair = document.createElementNS(svgNS, "line");
+    crosshair.setAttribute("y1", padT);
+    crosshair.setAttribute("y2", padT + plotH);
+    crosshair.setAttribute("stroke", "rgba(148, 163, 184, 0.4)");
+    crosshair.setAttribute("stroke-width", "1");
     crosshair.style.display = "none";
-    tooltip.style.display = "none";
+    hoverLayer.appendChild(crosshair);
+
+    const dot = document.createElementNS(svgNS, "circle");
+    dot.setAttribute("r", "3.5");
+    dot.setAttribute("fill", LINE);
+    dot.setAttribute("stroke", "#11192c");
+    dot.setAttribute("stroke-width", "2");
+    dot.style.display = "none";
+    hoverLayer.appendChild(dot);
+
+    svg.addEventListener("pointermove", (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((ev.clientX - rect.left) / rect.width) * width;
+      const targetT = tMin + ((px - padL) / plotW) * (tMax - tMin);
+      let nearest = 0, bestDist = Infinity;
+      times.forEach((t, i) => { const d = Math.abs(t - targetT); if (d < bestDist) { bestDist = d; nearest = i; } });
+
+      const cx = x(times[nearest]);
+      crosshair.setAttribute("x1", cx.toFixed(1));
+      crosshair.setAttribute("x2", cx.toFixed(1));
+      crosshair.style.display = "block";
+      dot.setAttribute("cx", cx.toFixed(1));
+      dot.setAttribute("cy", y(values[nearest]).toFixed(1));
+      dot.style.display = "block";
+
+      const d = new Date(times[nearest]);
+      const change = values[nearest] - values[0];
+      tooltip.innerHTML = `<strong>${money(values[nearest])}</strong>`
+        + ` <span style="color:${change >= 0 ? "#4ade80" : "#f87171"}">${signed(change)}</span>`
+        + `<br><span style="opacity:0.6">${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}</span>`;
+      tooltip.style.display = "block";
+      // Flips to the left of the crosshair near the right edge rather than being
+      // clipped by the card.
+      const tw = tooltip.offsetWidth;
+      const leftPx = (cx / width) * rect.width;
+      tooltip.style.left = Math.max(0, Math.min(leftPx + 12, rect.width - tw - 4)) + "px";
+      tooltip.style.top = "4px";
+    });
+    svg.addEventListener("pointerleave", () => {
+      crosshair.style.display = "none";
+      dot.style.display = "none";
+      tooltip.style.display = "none";
+    });
+  }
+
+  // Default is the shortest range that actually contains a bucket, so a bot that
+  // last traded a week ago opens on a curve instead of on a flat line and a
+  // change of 0.00.
+  const now0 = Date.now();
+  const initial = RANGES.find(r => series.some(p => p.t >= rangeStart(r, now0))) || RANGES[RANGES.length - 1];
+
+  RANGES.forEach((range) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "range-tab";
+    btn.textContent = range.key;
+    btn.setAttribute("aria-pressed", range === initial ? "true" : "false");
+    btn.addEventListener("click", () => {
+      tabsEl.querySelectorAll(".range-tab").forEach(b => b.setAttribute("aria-pressed", "false"));
+      btn.setAttribute("aria-pressed", "true");
+      render(range);
+    });
+    tabsEl.appendChild(btn);
+  });
+
+  render(initial);
+
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => render(current), 150);
   });
 })();
 </script>

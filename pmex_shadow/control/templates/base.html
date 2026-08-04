@@ -88,6 +88,29 @@
     .stat .value { font-size: 1.4rem; font-weight: 700; }
     .stat-row { display: flex; flex-wrap: wrap; gap: 1.25rem 2rem; margin-bottom: 0.5rem; }
     .stat-row .stat { margin-right: 0; }
+    /* Headline numbers (bot page). Two tiers on purpose: the money you'd quote to
+       someone — balance, P&L, turnover — gets its own card and a display-sized
+       figure; everything that only qualifies those numbers sits in the smaller
+       .metric row underneath. A flat row of twelve equal stats made every one of
+       them look equally worth reading, which none of them are. auto-fit keeps both
+       rows from collapsing into a single squeezed line on a narrow window. */
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; }
+    .stat-card { background: rgba(255, 255, 255, 0.025); border: 1px solid var(--card-border); border-radius: 10px; padding: 0.85rem 1rem; }
+    .stat-card .label { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; }
+    .stat-card .value { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin-top: 0.2rem; line-height: 1.15; }
+    .stat-card .sub { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.3rem; }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.6rem; margin-top: 0.75rem; }
+    .metric { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--card-border); border-radius: 10px; padding: 0.6rem 0.85rem; }
+    .metric .label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+    .metric .value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
+    .pos { color: #4ade80; } .neg { color: #f87171; }
+    /* Chart range selector — segmented, not a <select>: switching ranges is the
+       main way you read the curve, and it should be one click with the alternatives
+       visible, not a menu you have to open to remember what's in it. */
+    .range-tabs { display: flex; gap: 0.15rem; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 8px; padding: 0.2rem; }
+    .range-tab { font: inherit; font-size: 0.8rem; font-weight: 600; padding: 0.3rem 0.7rem; border-radius: 6px; border: none; background: transparent; color: var(--text-muted); cursor: pointer; }
+    .range-tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+    .range-tab[aria-pressed="true"] { background: rgba(59, 130, 246, 0.18); color: var(--text); }
     /* Compact chip-row: a row of small rounded status badges (dot + label) rather
        than the bigger .stat blocks — for "at a glance" counts (fleet.html's summary)
        where several short facts side by side reads better than five separate

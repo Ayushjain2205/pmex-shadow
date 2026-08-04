@@ -545,6 +545,12 @@ async def bot_detail(
         SELECT
             COALESCE(sum(realized_pnl_usd), 0) AS total_realized_pnl,
             COALESCE(sum(cost_basis_usd) FILTER (WHERE lifecycle = 'open'), 0) AS deployed_usd,
+            count(*) FILTER (WHERE lifecycle = 'open') AS open_positions,
+            -- "Pending" is everything that's left the market but hasn't paid out yet:
+            -- awaiting resolution, resolved-but-unredeemed, or disputed. Grouped
+            -- because the operator's question is the same for all three ("how much is
+            -- stuck waiting on someone else"), and each one alone is usually zero.
+            count(*) FILTER (WHERE lifecycle IN ('pending_resolution', 'resolved', 'disputed')) AS pending_positions,
             count(*) FILTER (WHERE lifecycle IN ('redeemed', 'written_off', 'refunded') AND realized_pnl_usd > 0) AS wins,
             count(*) FILTER (WHERE lifecycle IN ('redeemed', 'written_off', 'refunded') AND realized_pnl_usd <= 0) AS losses
         FROM positions WHERE bot_id = $1
@@ -552,6 +558,27 @@ async def bot_detail(
         bot_id,
     )
     closed_trades = summary["wins"] + summary["losses"]
+
+    # Wagered is gross buying, not net exposure: every dollar that has gone out the
+    # door, including the ones already recycled into the next position. It's the
+    # denominator that makes a $15 PnL on a $50 envelope legible — $15 on $1,331
+    # turned over is a different bot from $15 on $60.
+    wagered = await conn.fetchrow(
+        """
+        SELECT COALESCE(sum(filled_shares * avg_fill_price), 0) AS wagered_usd,
+               count(*) AS trades
+        FROM orders
+        WHERE bot_id = $1 AND side = 'BUY' AND filled_shares > 0 AND avg_fill_price IS NOT NULL
+        """,
+        bot_id,
+    )
+    # Dated from the first decision rather than the first fill: a bot that ran for a
+    # day before it found anything worth copying has been running for a day.
+    started_at = await conn.fetchval("SELECT min(created_at) FROM intents WHERE bot_id = $1", bot_id)
+    heartbeat_at = await conn.fetchval("SELECT at FROM heartbeats WHERE service = $1", f"bot:{bot_id}")
+    heartbeat_ok = heartbeat_at is not None and (
+        dt.datetime.now(dt.timezone.utc) - heartbeat_at <= BOT_HEARTBEAT_STALE_AFTER
+    )
 
     token_ids = {p["token_id"] for p in positions} | {i["token_id"] for i in recent_intents}
     titles = await get_market_titles(gamma_api_base_url, token_ids)
@@ -571,10 +598,19 @@ async def bot_detail(
         "envelope_usd": envelope_usd,
         "total_realized_pnl": summary["total_realized_pnl"],
         "deployed_usd": summary["deployed_usd"],
+        "open_positions": summary["open_positions"],
+        "pending_positions": summary["pending_positions"],
         "wins": summary["wins"],
         "losses": summary["losses"],
         "closed_trades": closed_trades,
         "win_rate": (summary["wins"] / closed_trades) if closed_trades > 0 else None,
+        "avg_pnl_per_trade": (summary["total_realized_pnl"] / closed_trades) if closed_trades > 0 else None,
+        "wagered_usd": wagered["wagered_usd"],
+        "trade_count": wagered["trades"],
+        "avg_trade_usd": (wagered["wagered_usd"] / wagered["trades"]) if wagered["trades"] else None,
+        "started_at": started_at,
+        "heartbeat_at": heartbeat_at,
+        "heartbeat_ok": heartbeat_ok,
         "pos_pg": pos_pg, "dec_pg": dec_pg, "log_pg": log_pg,
         "archived": await conn.fetchrow(
             "SELECT archived_at, archived_reason FROM bots WHERE bot_id = $1 AND archived_at IS NOT NULL", bot_id,
