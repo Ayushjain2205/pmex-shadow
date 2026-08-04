@@ -14,8 +14,55 @@
   </div>
   {% endif %}
 {% endmacro %}
-<p><a href="/">← Fleet</a></p>
-<h1>{{ bot_id }} <a href="/bots/{{ bot_id }}/params" class="button" style="font-size: 0.9rem;">params →</a></h1>
+<div class="crumbs">
+  <a href="/">pmex-shadow</a><span class="sep">/</span><a href="/">Fleet</a><span class="sep">/</span><span class="here">{{ bot_id }}</span>
+  <span class="crumb-nav">
+    {% if prev_bot %}<a class="button button-ghost" href="/bots/{{ prev_bot }}">← {{ prev_bot }}</a>
+    {% else %}<span class="button button-ghost button-off">← Prev</span>{% endif %}
+    {% if next_bot %}<a class="button button-ghost" href="/bots/{{ next_bot }}">{{ next_bot }} →</a>
+    {% else %}<span class="button button-ghost button-off">Next →</span>{% endif %}
+  </span>
+</div>
+
+<div class="page-head">
+  <h1>{{ bot_id }}</h1>
+  <div class="head-actions">
+    {% if archived %}
+    <span class="chip"><span class="chip-dot chip-dot-gray"></span>Archived</span>
+    {% elif halted %}
+    <span class="chip" title="{{ halt_reason or '' }}"><span class="chip-dot chip-dot-red"></span>Halted</span>
+    {% elif not heartbeat_ok %}
+    <span class="chip"><span class="chip-dot chip-dot-red"></span>No heartbeat</span>
+    {% else %}
+    <span class="chip"><span class="chip-dot chip-dot-green"></span>Bot running</span>
+    {% endif %}
+    {% if mode %}<span class="pill pill-{{ mode }}">{{ mode|upper }}</span>{% endif %}
+    <a class="button button-ghost" href="/bots/{{ bot_id }}/params">✎ Edit</a>
+    {# Archived bots are stopped by definition, so the halt/resume pair would be a
+       button that does nothing to a bot that isn't running. #}
+    {% if archived %}
+    <form method="post" action="/bots/{{ bot_id }}/unarchive" class="bot-action-form" data-action="unarchive" data-bot="{{ bot_id }}">
+      <button type="submit" class="button-ghost" {{ "disabled" if not writes_enabled }}>↩ Unarchive</button>
+    </form>
+    {% elif halted %}
+    <form method="post" action="/bots/{{ bot_id }}/resume" class="bot-action-form" data-action="resume" data-bot="{{ bot_id }}">
+      <input type="hidden" name="return_to" value="/bots/{{ bot_id }}">
+      <button type="submit" class="button-go" {{ "disabled" if not writes_enabled }}>▶ Resume</button>
+    </form>
+    {% else %}
+    <form method="post" action="/bots/{{ bot_id }}/halt" class="bot-action-form" data-action="stop" data-bot="{{ bot_id }}">
+      <input type="hidden" name="return_to" value="/bots/{{ bot_id }}">
+      <button type="submit" class="button-danger" {{ "disabled" if not writes_enabled }}>■ Stop</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+{% if message %}<div class="banner banner-success">{{ message }}</div>{% endif %}
+{% if error %}<div class="banner banner-error">{{ error }}</div>{% endif %}
+{% if halted and not archived %}
+<div class="banner banner-error">Halted{% if halt_reason %} — {{ halt_reason }}{% endif %}. No new decisions are being made; open orders were left resting.</div>
+{% endif %}
 {% if archived %}
 <div class="banner banner-muted">
   Archived {{ archived.archived_at.strftime("%Y-%m-%d") }}{% if archived.archived_reason %} — {{ archived.archived_reason }}{% endif %}.

@@ -12,6 +12,7 @@ touches Prometheus.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,18 @@ from pmex_shadow.config import Settings
 from pmex_shadow.control import config_write, queries
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+_BOT_PATH = re.compile(r"^/bots/[A-Za-z0-9_.-]+$")
+
+
+def _return_to(value: str) -> str:
+    """Where a stop/resume POST lands. Stopping a bot from its own page and being
+    thrown back to the fleet list loses the thing you were looking at, so the form
+    says where it came from — but only a bot page is honoured, matched against a
+    pattern rather than trusted, so a crafted form can't turn these endpoints into
+    an open redirect.
+    """
+    return value if _BOT_PATH.match(value) else "/"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -123,33 +136,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RedirectResponse(f"/?message={quote(f'{bot_id} unarchived — still stopped')}", status_code=303)
 
     @app.post("/bots/{bot_id}/halt")
-    async def bot_halt(request: Request, bot_id: str):
+    async def bot_halt(request: Request, bot_id: str, return_to: str = Form("")):
         from urllib.parse import quote
 
         from pmex_shadow.ops.killswitch import halt_bot
 
+        back = _return_to(return_to)
         async with app.state.pool.acquire() as conn:
             current = await config_write.get_active_config(conn, bot_id)
             if current is None:
-                return RedirectResponse(f"/?error={quote(f'bot {bot_id} not found')}", status_code=303)
+                return RedirectResponse(f"{back}?error={quote(f'bot {bot_id} not found')}", status_code=303)
             await halt_bot(conn, bot_id, "manual stop (control UI)", flatten=False)
-        return RedirectResponse(f"/?message={quote(f'{bot_id} halted')}", status_code=303)
+        return RedirectResponse(f"{back}?message={quote(f'{bot_id} halted')}", status_code=303)
 
     @app.post("/bots/{bot_id}/resume")
-    async def bot_resume_route(request: Request, bot_id: str):
+    async def bot_resume_route(request: Request, bot_id: str, return_to: str = Form("")):
         from urllib.parse import quote
 
         from pmex_shadow.ops.killswitch import resume_bot
 
+        back = _return_to(return_to)
         async with app.state.pool.acquire() as conn:
             current = await config_write.get_active_config(conn, bot_id)
             if current is None:
-                return RedirectResponse(f"/?error={quote(f'bot {bot_id} not found')}", status_code=303)
+                return RedirectResponse(f"{back}?error={quote(f'bot {bot_id} not found')}", status_code=303)
             await resume_bot(conn, bot_id)
-        return RedirectResponse(f"/?message={quote(f'{bot_id} resumed')}", status_code=303)
+        return RedirectResponse(f"{back}?message={quote(f'{bot_id} resumed')}", status_code=303)
 
     @app.get("/bots/{bot_id}")
-    async def bot_detail(request: Request, bot_id: str, pos_page: int = 1, dec_page: int = 1, log_page: int = 1):
+    async def bot_detail(
+        request: Request, bot_id: str, pos_page: int = 1, dec_page: int = 1, log_page: int = 1,
+        message: str | None = None, error: str | None = None,
+    ):
         import json as _json
 
         async with app.state.pool.acquire() as conn:
@@ -159,7 +177,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ])
         return templates.TemplateResponse(
             request, "bot_detail.html",
-            _ctx(request, bot_id=bot_id, active_nav="fleet", **detail, equity_curve_json=equity_curve_json),
+            _ctx(request, bot_id=bot_id, active_nav="fleet", **detail,
+                 message=message, error=error, equity_curve_json=equity_curve_json),
         )
 
     @app.get("/targets")

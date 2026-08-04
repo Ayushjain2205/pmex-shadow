@@ -179,6 +179,31 @@ BOT_HEARTBEAT_STALE_AFTER = dt.timedelta(seconds=60)  # bots write one every 5s 
 FLEET_STATUSES = ("running", "halted", "stale")
 
 
+async def halt_state(conn: asyncpg.Connection, bot_id: str) -> tuple[bool, str | None]:
+    """Whether the bot is halted, and why.
+
+    Mirrors ledger/subaccount.py's get_ledger_state() halted check exactly (same
+    events, same "most recent halt vs most recent resume" rule) — not imported from
+    there since that function also pulls positions/exposure the control views don't
+    need; duplicated as one query pair, not re-derived differently. Shared between
+    the fleet list and the bot page so a bot can't read as halted on one and running
+    on the other.
+    """
+    last_halt = await conn.fetchrow(
+        "SELECT component, message, context, at FROM events WHERE bot_id = $1 AND level = 'CRITICAL' "
+        "AND component IN ('ledger.reconcile', 'killswitch') ORDER BY at DESC LIMIT 1",
+        bot_id,
+    )
+    last_resume = await conn.fetchrow(
+        "SELECT at FROM events WHERE bot_id = $1 AND component = 'killswitch' AND message = 'resumed' ORDER BY at DESC LIMIT 1",
+        bot_id,
+    )
+    if last_halt is None or (last_resume is not None and last_resume["at"] >= last_halt["at"]):
+        return False, None
+    ctx = _jsonb(last_halt["context"]) if last_halt["context"] is not None else {}
+    return True, ctx.get("reason") or last_halt["message"]
+
+
 async def fleet_view(
     conn: asyncpg.Connection,
     mode: str | None = None,
@@ -231,25 +256,7 @@ async def fleet_view(
         heartbeat_at = heartbeat["at"] if heartbeat else None
         is_stale = heartbeat_at is None or dt.datetime.now(dt.timezone.utc) - heartbeat_at > BOT_HEARTBEAT_STALE_AFTER
 
-        # Mirrors ledger/subaccount.py's get_ledger_state() halted check exactly
-        # (same events, same "most recent halt vs most recent resume" rule) — not
-        # imported from there since that function also pulls positions/exposure
-        # this view doesn't need; duplicated as one query pair, not re-derived
-        # differently.
-        last_halt = await conn.fetchrow(
-            "SELECT component, message, context, at FROM events WHERE bot_id = $1 AND level = 'CRITICAL' "
-            "AND component IN ('ledger.reconcile', 'killswitch') ORDER BY at DESC LIMIT 1",
-            bot_id,
-        )
-        last_resume = await conn.fetchrow(
-            "SELECT at FROM events WHERE bot_id = $1 AND component = 'killswitch' AND message = 'resumed' ORDER BY at DESC LIMIT 1",
-            bot_id,
-        )
-        halted = last_halt is not None and (last_resume is None or last_halt["at"] > last_resume["at"])
-        halt_reason = None
-        if halted:
-            ctx = _jsonb(last_halt["context"]) if last_halt["context"] is not None else {}
-            halt_reason = ctx.get("reason") or last_halt["message"]
+        halted, halt_reason = await halt_state(conn, bot_id)
 
         envelope_usd = Decimal(str(config.get("risk", {}).get("envelope_usd") or 0))
 
@@ -538,7 +545,21 @@ async def bot_detail(
         l["context_summary"] = _context_summary(l["context"])
 
     config_row = await conn.fetchrow("SELECT config FROM bot_config WHERE bot_id = $1 AND active", bot_id)
-    envelope_usd = _jsonb(config_row["config"]).get("risk", {}).get("envelope_usd") if config_row else None
+    config = _jsonb(config_row["config"]) if config_row else {}
+    envelope_usd = config.get("risk", {}).get("envelope_usd")
+
+    # Prev/next walk the same alphabetical order the fleet table is listed in, so
+    # paging through bots from here matches the list you came from. Archived bots
+    # are in the ring only when you're already looking at one — otherwise stepping
+    # through the fleet would drop you on a retired bot.
+    siblings = [r["bot_id"] for r in await conn.fetch(
+        "SELECT bc.bot_id FROM bot_config bc LEFT JOIN bots b ON b.bot_id = bc.bot_id "
+        "WHERE bc.active AND (b.archived_at IS NULL OR bc.bot_id = $1) ORDER BY bc.bot_id",
+        bot_id,
+    )]
+    here = siblings.index(bot_id) if bot_id in siblings else None
+    prev_bot = siblings[here - 1] if here else None
+    next_bot = siblings[here + 1] if here is not None and here + 1 < len(siblings) else None
 
     summary = await conn.fetchrow(
         """
@@ -579,6 +600,7 @@ async def bot_detail(
     heartbeat_ok = heartbeat_at is not None and (
         dt.datetime.now(dt.timezone.utc) - heartbeat_at <= BOT_HEARTBEAT_STALE_AFTER
     )
+    halted, halt_reason = await halt_state(conn, bot_id)
 
     token_ids = {p["token_id"] for p in positions} | {i["token_id"] for i in recent_intents}
     titles = await get_market_titles(gamma_api_base_url, token_ids)
@@ -611,6 +633,11 @@ async def bot_detail(
         "started_at": started_at,
         "heartbeat_at": heartbeat_at,
         "heartbeat_ok": heartbeat_ok,
+        "mode": config.get("mode"),
+        "halted": halted,
+        "halt_reason": halt_reason,
+        "prev_bot": prev_bot,
+        "next_bot": next_bot,
         "pos_pg": pos_pg, "dec_pg": dec_pg, "log_pg": log_pg,
         "archived": await conn.fetchrow(
             "SELECT archived_at, archived_reason FROM bots WHERE bot_id = $1 AND archived_at IS NOT NULL", bot_id,

@@ -137,6 +137,28 @@
     button { font: inherit; padding: 0.5rem 1rem; border-radius: 6px; border: none; background: var(--accent); color: white; font-weight: 600; cursor: pointer; }
     button:hover { opacity: 0.9; }
     a.button { display: inline-block; text-decoration: none; }
+    /* Named button roles so "stop is red" lives in one place instead of being
+       re-typed as an inline style at every call site. */
+    .button-ghost { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--card-border); color: var(--text); }
+    .button-ghost:hover { background: rgba(255, 255, 255, 0.09); }
+    .button-danger { background: #dc2626; color: white; }
+    .button-go { background: #16a34a; color: white; }
+    .button-off { opacity: 0.35; pointer-events: none; }
+    /* Page header (bot page). The breadcrumb answers "where am I" and the action
+       row answers "what is this bot doing, and what can I do about it" — both above
+       the fold, so stopping a bot never means going back to the fleet list first. */
+    .crumbs { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.75rem; flex-wrap: wrap; }
+    .crumbs a { color: var(--text-muted); text-decoration: none; }
+    .crumbs a:hover { color: var(--text); }
+    .crumbs .here { color: var(--text); }
+    .crumbs .sep { opacity: 0.4; }
+    .crumbs .crumb-nav { margin-left: auto; display: flex; gap: 0.4rem; }
+    .crumbs .crumb-nav .button { font-size: 0.8rem; padding: 0.3rem 0.7rem; font-weight: 600; }
+    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .page-head h1 { margin: 0; }
+    .head-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .head-actions form { margin: 0; }
+    .head-actions .button, .head-actions button { font-size: 0.9rem; padding: 0.45rem 0.9rem; }
     a { color: #60a5fa; }
     code { font-size: 0.85em; color: var(--text-muted); }
   </style>
@@ -209,6 +231,44 @@
     // Nothing on these pages auto-refreshes, so a relative label would otherwise
     // sit frozen at "now" while the underlying data went stale.
     setInterval(renderTimestamps, 15000);
+
+    // Stop/resume/archive controls appear on both the fleet list and a bot's own
+    // page and must ask the same question in the same words wherever they're
+    // clicked — one bot-action form is one bot-action form.
+    const ACTIONS = {
+      stop: {
+        pending: "Stopping…",
+        ask: (b) => `Stop bot "${b}"? This halts its decision loop immediately (open orders are left resting).`,
+      },
+      resume: {
+        pending: "Resuming…",
+        ask: (b) => `Resume bot "${b}"? It will start making trading decisions again.`,
+      },
+      archive: {
+        pending: "Archiving…",
+        ask: (b) => `Archive bot "${b}"? It leaves the fleet list but keeps all history, and nothing is deleted or stopped. Reversible.`,
+      },
+      unarchive: {
+        pending: "Restoring…",
+        ask: (b) => `Unarchive bot "${b}"? It returns to the fleet list. This does not start it.`,
+      },
+    };
+
+    document.querySelectorAll("form.bot-action-form").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        const spec = ACTIONS[form.dataset.action];
+        if (!spec) { return; }
+        if (!window.confirm(spec.ask(form.dataset.bot))) {
+          event.preventDefault();
+          return;
+        }
+        const button = form.querySelector("button[type=submit]");
+        if (button) {
+          button.disabled = true;
+          button.textContent = spec.pending;
+        }
+      });
+    });
   </script>
 </body>
 </html>
